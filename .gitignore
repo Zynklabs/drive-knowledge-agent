@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets: never commit keys, tokens, or local config
+.env
+.env.*
+!.env.example
+*.json.key
+service-account*.json
+client_secret*.json
+token.json
+drive-agent.yaml
+
+# Local agent state (vector DB files, sync state, OAuth tokens)
+.drive-agent/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,63 @@
+# Example Drive Knowledge Agent config. Copy to drive-agent.yaml and edit.
+# Secrets (API keys, tokens) do NOT go here: use .env or the environment (see .env.example).
+#
+# drive.auth_mode:        service_account | oauth
+# drive.folder_ids:       folder URLs or IDs (sub-folders are indexed recursively)
+# drive.include_mime:     docs, slides, pdf, docx, pptx, txt, md, html, json
+#                         (Excel, Google Sheets and CSV are out of scope)
+# embeddings.provider:    voyage | openai | cohere | google | local  (model defaults per provider)
+# vector_store.provider:  chroma | qdrant | pinecone | pgvector
+# agent.mode:             rag | agentic | auto
+# agent.checkpointer:     memory | sqlite | postgres
+# tracing.provider:       none | langsmith | langfuse
+# interfaces.slack.mode:  socket | http
+
+data_dir: .drive-agent
+drive:
+  auth_mode: service_account
+  folder_ids:
+  - YOUR_FOLDER_ID_OR_URL
+  credentials_file: null
+  oauth_client_file: null
+  impersonate_user: null
+  include_mime:
+  - docs
+  - slides
+  - pdf
+  - docx
+  - pptx
+  - txt
+  - md
+  max_file_mb: 50
+  max_depth: null
+ingest:
+  chunk_tokens: 800
+  chunk_overlap: 120
+  contextual_chunks: true
+  schedule_cron: 0 */6 * * *
+embeddings:
+  provider: voyage
+  model: null                 # null = provider default
+vector_store:
+  provider: chroma
+  collection: drive_agent
+  url: null
+  persist_dir: .drive-agent/chroma
+retrieval:
+  top_k: 30
+  rerank: true
+  final_k: 8
+  hybrid: true
+llm:
+  provider: anthropic
+  answer_model: claude-sonnet-5-5
+  fast_model: claude-haiku-5-5
+agent:
+  mode: auto
+  checkpointer: sqlite
+tracing:
+  provider: none
+interfaces:
+  slack:
+    mode: socket
+    allowed_channels: []
