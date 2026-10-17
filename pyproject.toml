@@ -38,6 +38,7 @@ classifiers = [
 # are added as dependencies / optional extras in the milestone that uses them.
 dependencies = [
   "anthropic>=1.0",
+  "apscheduler>=3.10,<4",
   "beautifulsoup4>=4.12",
   "fastembed>=0.9",
   "google-api-python-client>=2.150",
@@ -110,7 +111,7 @@ mypy_path = "src"
 packages = ["drive_agent"]
 
 [[tool.mypy.overrides]]
-module = ["googleapiclient.*", "google_auth_oauthlib.*"]
+module = ["googleapiclient.*", "google_auth_oauthlib.*", "apscheduler.*"]
 ignore_missing_imports = true
 
 # google-auth ships py.typed but leaves many functions unannotated.

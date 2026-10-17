@@ -1,5 +1,6 @@
 import json
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ import drive_agent.llm.claude
 from drive_agent.core.agent import AgentReply
 from drive_agent.core.config import ConfigError, Settings, SlackSettings
 from drive_agent.drive.auth import DriveAuthError
+from drive_agent.indexing.scheduler import SyncBusy
 from drive_agent.indexing.sync import SyncReport
 from drive_agent.interfaces.cli import app as cli_app
 from drive_agent.interfaces.slack_bot import bot as bot_module
@@ -347,45 +349,71 @@ def test_required_tokens_by_mode() -> None:
     assert runner.required_tokens(ok) == {"SLACK_BOT_TOKEN": "xoxb-1", "SLACK_APP_TOKEN": "xapp-1"}
 
 
-def test_bot_sync_reports_summary_or_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    settings = Settings.model_validate({"data_dir": str(tmp_path)})
-    monkeypatch.setattr(runner, "sync_now", lambda s, i: SyncReport(added=3, unchanged=29))
-    bot = runner.make_bot(settings, FakeAgent(), index := _fake_index())  # type: ignore[arg-type]
+class FakeKB:
+    """Just enough KnowledgeBase for the runner: status, sync and agent."""
+
+    def __init__(self, tmp_path: Path, sync_result: Any = None) -> None:
+        from drive_agent.core.knowledge_base import IndexStatus
+
+        self.settings = Settings.model_validate(
+            {"data_dir": str(tmp_path), "interfaces": {"slack": {"admin_users": ["*"]}}}
+        )
+        self.index = type("Index", (), {"description": "qdrant x / y"})()
+        self.sync_result = sync_result
+        self.status_value = IndexStatus(
+            chunks=7,
+            files=3,
+            failed=0,
+            last_sync=datetime(2026, 10, 17, 9, 44, tzinfo=UTC),
+            schedule="0 */6 * * *",
+            next_sync=datetime(2026, 10, 17, 12, 0, tzinfo=UTC),
+            overdue=False,
+            syncing=False,
+        )
+
+    def status(self) -> Any:
+        return self.status_value
+
+    def sync(self, trigger: str = "manual") -> Any:
+        if isinstance(self.sync_result, Exception):
+            raise self.sync_result
+        return self.sync_result
+
+    def agent(self) -> Any:
+        return FakeAgent()
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (SyncReport(added=3, unchanged=29), ":white_check_mark: Sync done: +3 added"),
+        (SyncBusy(), ":hourglass_flowing_sand: A sync is already running"),
+        (DriveAuthError("key not found"), ":warning: Sync failed: key not found"),
+    ],
+)
+def test_bot_sync_goes_through_the_knowledge_base(
+    tmp_path: Path, result: Any, expected: str
+) -> None:
+    bot = runner.make_bot(FakeKB(tmp_path, result))  # type: ignore[arg-type]
     respond = Responder()
-    bot._settings = SlackSettings(admin_users=["U1"])
-    bot.handle_command(command("sync"), respond)
-    assert respond.calls[-1]["text"].startswith(":white_check_mark: Sync done: +3 added")
-
-    def fail(s: Any, i: Any) -> None:
-        raise DriveAuthError("key not found")
-
-    monkeypatch.setattr(runner, "sync_now", fail)
-    bot.handle_command(command("sync"), respond)
-    assert respond.calls[-1]["text"] == ":warning: Sync failed: key not found"
-    assert index.closed is False
-
-
-def _fake_index() -> Any:
-    class Index:
-        namespace = "qdrant:x/y"
-        description = "qdrant x / y"
-        closed = False
-
-        def count(self) -> int:
-            return 7
-
-    return Index()
+    bot.handle_command(command("sync", "Uanyone"), respond)  # admin_users ["*"]: everyone
+    assert respond.calls[-1]["text"].startswith(expected)
 
 
 def test_status_text(tmp_path: Path) -> None:
-    from drive_agent.indexing.state import STATE_DB, SQLiteRecordManager
+    kb = FakeKB(tmp_path)
+    text = runner.status_text(kb)  # type: ignore[arg-type]
+    assert text.splitlines() == [
+        "*Index:* 7 chunks from 3 files · last sync 2026-10-17 09:44 UTC",
+        "*Auto-sync:* `0 */6 * * *` (UTC) · next 2026-10-17 12:00 UTC",
+        "*Store:* qdrant x / y",
+    ]
+    from dataclasses import replace
 
-    settings = Settings.model_validate({"data_dir": str(tmp_path)})
-    records = SQLiteRecordManager("qdrant:x/y", tmp_path / STATE_DB)
-    records.set_meta("last_sync", {"files": 3, "at": "2026-10-17T09:44:45+00:00"})
-    records.close()
-    text = runner.status_text(settings, _fake_index())
-    assert text.startswith("*Index:* 7 chunks from 3 files · last sync 2026-10-17 09:44 UTC")
+    kb.status_value = replace(kb.status_value, schedule=None, next_sync=None, syncing=True)
+    text = runner.status_text(kb)  # type: ignore[arg-type]
+    assert "syncing now" in text
+    assert "*Auto-sync:* off" in text
 
 
 # --- CLI ----------------------------------------------------------------------
@@ -405,9 +433,10 @@ def test_cli_slack_starts_bot(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr(drive_agent.llm.claude, "ClaudeLLM", lambda s: FakeLLM())
     started: list[Any] = []
-    monkeypatch.setattr(runner, "run", lambda settings, agent, index: started.append(agent))
+    monkeypatch.setattr(runner, "run", lambda kb: started.append(kb))
     result = CliRunner().invoke(cli_app, ["slack"])
     assert result.exit_code == 0, result.output
     assert "Slack bot running in socket mode" in result.output
     assert "index is empty" in result.output
+    assert "Auto-sync: off" in result.output  # tests run with SYNC_SCHEDULE=off
     assert len(started) == 1

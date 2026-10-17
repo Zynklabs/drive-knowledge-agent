@@ -177,7 +177,8 @@ class SlackBot:
         elif sub == "status":
             respond(text=self._status(), response_type="ephemeral")
         elif sub == "sync":
-            if command.get("user_id") not in self._settings.admin_users:
+            admins = self._settings.admin_users
+            if "*" not in admins and command.get("user_id") not in admins:
                 respond(
                     text="Only admins can sync (interfaces.slack.admin_users).",
                     response_type="ephemeral",

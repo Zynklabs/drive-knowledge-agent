@@ -66,10 +66,10 @@ def _render_turn(turn: dict[str, Any]) -> None:
 
 def render_chat() -> None:
     st.title("Ask your Drive")
-    resources = get_resources()
-    if resources is None:
+    kb = get_resources()
+    if kb is None:
         return
-    if resources.index.count() == 0:
+    if kb.index.count() == 0:
         st.info("The index is empty. Open the **Index** page and run a sync first.")
         return
 
@@ -103,7 +103,7 @@ def render_chat() -> None:
 
         try:
             with st.spinner("Searching your Drive…"):
-                reply = resources.agent().ask(question, thread_id=state.thread_id, on_text=on_text)
+                reply = kb.agent().ask(question, thread_id=state.thread_id, on_text=on_text)
         except (LLMError, ConfigError) as exc:
             placeholder.empty()
             st.error(str(exc))

@@ -37,7 +37,7 @@ Finally, invite the bot to a channel with `/invite @Drive Agent`.
 | Direct message to the bot | Same as a mention, in a private conversation |
 | `/drive-agent <question>` | A private (ephemeral) answer only you can see; no memory between commands |
 | `/drive-agent status` | Index size and last sync |
-| `/drive-agent sync` | Re-index Drive. **Admins only** (see below) |
+| `/drive-agent sync` | Re-index now. **Admins only** (see below); the bot also re-syncs automatically |
 
 The bot shows "Searching your Drive…" straight away, then edits that message as the answer streams in.
 
@@ -68,13 +68,18 @@ drive-agent --bot hr ui --port 8502
 
 Each bot runs as its own process, so start one `drive-agent --bot <name> slack` per bot (in separate terminals, or as separate services under a process manager or Docker). Values in `bots/<name>.env` override the shared `.env`. An empty value there, such as `SLACK_BOT_TOKEN=`, blanks out the shared one, so bots never share a Slack app by accident.
 
+### Automatic sync
+
+While the bot runs, it keeps its own index fresh: it re-syncs on `SYNC_SCHEDULE` (cron, UTC; default `0 */6 * * *`, every 6 hours) and catches up at startup if a scheduled sync was missed. Each bot can have its own schedule in `bots/<name>.env`, e.g. `SYNC_SCHEDULE=0 * * * *` for hourly, or `SYNC_SCHEDULE=off`. `/drive-agent status` shows the next run. A manual `/drive-agent sync` can't overlap an automatic one: the bot replies that a sync is already running.
+
 ## 5. Settings
 
 | Setting (`drive-agent.yaml` → `interfaces.slack`) | Env var | Default | Meaning |
 |---|---|---|---|
 | `allowed_channels` | `SLACK_ALLOWED_CHANNELS` | empty = all | Channel IDs (e.g. `C0123ABC`) where the bot answers |
 | `allow_dms` | `DRIVE_AGENT__INTERFACES__SLACK__ALLOW_DMS` | `true` | Answer direct messages |
-| `admin_users` | `SLACK_ADMIN_USERS` | empty = nobody | User IDs (e.g. `U0123ABC`) allowed to run `/drive-agent sync` |
+| `admin_users` | `SLACK_ADMIN_USERS` | empty = nobody | User IDs (e.g. `U0123ABC`) allowed to run `/drive-agent sync`; `*` = everyone |
+| `ingest.schedule_cron` | `SYNC_SCHEDULE` | `0 */6 * * *` | Auto-sync schedule (cron, UTC); `off` disables it |
 | `command` | `SLACK_COMMAND` | `/drive-agent` | The slash command; each bot in a workspace needs its own |
 | `mode` | `SLACK_MODE` | `socket` | `http` to receive events at a public URL instead |
 | `http_port` | `DRIVE_AGENT__INTERFACES__SLACK__HTTP_PORT` | `3000` | Port for HTTP mode |

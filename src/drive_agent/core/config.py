@@ -65,6 +65,7 @@ ENV_ALIASES: dict[str, str] = {
     "DRIVE_FOLDER_ID": "drive.folder_ids",
     "DRIVE_FOLDER_IDS": "drive.folder_ids",
     "CONTEXTUAL_CHUNKS": "ingest.contextual_chunks",
+    "SYNC_SCHEDULE": "ingest.schedule_cron",
     "EMBEDDINGS_PROVIDER": "embeddings.provider",
     "EMBEDDINGS_MODEL": "embeddings.model",
     "VECTOR_STORE": "vector_store.provider",
@@ -82,6 +83,8 @@ ENV_ALIASES: dict[str, str] = {
 }
 
 DEFAULT_FILE_KINDS: tuple[FileKind, ...] = ("docs", "slides", "pdf", "docx", "pptx", "txt", "md")
+
+OFF_VALUES = frozenset({"", "off", "none", "never", "false", "disabled"})
 
 # Excel, Google Sheets, and CSV are out of scope: tabular data can be huge and chunks poorly.
 EXCLUDED_FILE_KINDS = ("xlsx", "xls", "xlsm", "sheets", "csv")
@@ -155,6 +158,22 @@ class IngestSettings(_Section):
     chunk_overlap: int = Field(default=120, ge=0)
     contextual_chunks: bool = False  # Claude-written chunk context; not implemented yet
     schedule_cron: str | None = "0 */6 * * *"
+    """Auto-sync schedule (crontab, UTC) for long-running bots; ``off`` disables it."""
+
+    @field_validator("schedule_cron", mode="before")
+    @classmethod
+    def _parse_schedule(cls, value: Any) -> Any:
+        if value is None or (isinstance(value, str) and value.strip().lower() in OFF_VALUES):
+            return None
+        if isinstance(value, str):
+            from apscheduler.triggers.cron import CronTrigger
+
+            try:
+                CronTrigger.from_crontab(value.strip(), timezone="UTC")
+            except ValueError as exc:
+                raise ValueError(f"invalid cron expression {value!r}: {exc}") from exc
+            return value.strip()
+        return value
 
     @model_validator(mode="after")
     def _overlap_smaller_than_chunk(self) -> Self:

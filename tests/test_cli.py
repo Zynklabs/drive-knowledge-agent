@@ -371,3 +371,21 @@ def test_ask_reports_claude_errors(synced: list[object], monkeypatch: pytest.Mon
     result = runner.invoke(app, ["ask", "Who knows Go?"])
     assert result.exit_code == 1
     assert "No Claude credentials found" in result.output
+
+
+def test_ask_warns_when_index_is_overdue(
+    synced: list[object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from drive_agent.core.config import load_settings
+    from drive_agent.indexing.state import STATE_DB, SQLiteRecordManager
+    from drive_agent.vectorstores.location import namespace_for
+
+    settings = load_settings()
+    records = SQLiteRecordManager(namespace_for(settings), settings.data_dir / STATE_DB)
+    records.set_meta("last_sync", {"at": "2026-01-01T00:00:00+00:00", "files": 1, "chunks": 1})
+    records.close()
+    monkeypatch.setenv("SYNC_SCHEDULE", "0 * * * *")
+    result = runner.invoke(app, ["ask", "Who knows Go?"])
+    assert result.exit_code == 0, result.output
+    assert "scheduled sync is overdue" in " ".join(result.output.split())
+    assert "Agent: Jane Doe knows Go [1]." in result.output

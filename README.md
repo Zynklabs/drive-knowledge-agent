@@ -104,6 +104,17 @@ drive-agent ui                                   # http://localhost:8501
 
 The app binds to `localhost` by default. To serve it to others (`drive-agent ui --host 0.0.0.0`), set `UI_PASSWORD` first: everyone who can open the app can query everything the agent indexed. Streamlit usage statistics are turned off.
 
+## Keeping the index fresh (auto-sync)
+
+The agent re-syncs Drive by itself on a schedule (`ingest.schedule_cron`, default every 6 hours, UTC) whenever it runs as a long-lived process: the Slack bot, the web app, or the dedicated watcher:
+
+```bash
+drive-agent sync --watch                 # keep this index fresh without a bot or web app
+SYNC_SCHEDULE="0 * * * *" drive-agent slack   # hourly; SYNC_SCHEDULE=off disables it
+```
+
+When one of these starts and a scheduled sync was missed while nothing was running, it catches up immediately. Scheduled and manual syncs (CLI, web app, `/drive-agent sync`) share one lock, so they never overlap. `drive-agent status` shows when the next sync is due, and `drive-agent ask` warns if the index is overdue.
+
 ## Slack bot
 
 ```bash

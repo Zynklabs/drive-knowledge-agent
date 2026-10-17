@@ -85,5 +85,7 @@ def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     for name in list(os.environ):
         if name in managed or name.startswith(NESTED_ENV_PREFIX):
             monkeypatch.delenv(name)
+    # Long-running hosts (web app, bot) start auto-sync; tests opt in explicitly.
+    monkeypatch.setenv("SYNC_SCHEDULE", "off")
     monkeypatch.chdir(tmp_path)
     return tmp_path

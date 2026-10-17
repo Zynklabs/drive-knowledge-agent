@@ -1,17 +1,16 @@
-"""Build the agent and start the Slack bot in Socket Mode or HTTP mode."""
+"""Start the Slack bot on top of a KnowledgeBase (Socket Mode or HTTP mode)."""
 
 from __future__ import annotations
 
-import logging
+from datetime import datetime
 from typing import Any
 
-from drive_agent.core.agent import DriveAgent
 from drive_agent.core.config import ConfigError, Settings
+from drive_agent.core.knowledge_base import KnowledgeBase
 from drive_agent.drive.auth import DriveAuthError
-from drive_agent.indexing.state import STATE_DB, SQLiteRecordManager
-from drive_agent.indexing.sync import SyncError, summarize, sync_now
+from drive_agent.indexing.scheduler import SyncBusy
+from drive_agent.indexing.sync import SyncError, summarize
 from drive_agent.interfaces.slack_bot.bot import SlackBot, register
-from drive_agent.vectorstores import VectorIndex
 
 FEEDBACK_FILE = "feedback.jsonl"
 
@@ -32,47 +31,53 @@ def required_tokens(settings: Settings) -> dict[str, str]:
     return {name: value.get_secret_value() for name, value in needed.items() if value is not None}
 
 
-def status_text(settings: Settings, vector_index: VectorIndex) -> str:
-    records = SQLiteRecordManager(vector_index.namespace, settings.data_dir / STATE_DB)
-    try:
-        last = records.get_meta("last_sync") or {}
-    finally:
-        records.close()
-    when = last.get("at", "never").replace("T", " ")[:16]
-    return (
-        f"*Index:* {vector_index.count()} chunks from {last.get('files', 0)} files · "
-        f"last sync {when} UTC\n*Store:* {vector_index.description}"
-    )
+def _utc(moment: datetime | None) -> str:
+    return moment.strftime("%Y-%m-%d %H:%M UTC") if moment else "never"
 
 
-def make_bot(settings: Settings, agent: DriveAgent, vector_index: VectorIndex) -> SlackBot:
+def status_text(kb: KnowledgeBase) -> str:
+    status = kb.status()
+    lines = [
+        f"*Index:* {status.chunks} chunks from {status.files} files · "
+        f"last sync {_utc(status.last_sync)}"
+        + (" · :arrows_counterclockwise: syncing now" if status.syncing else "")
+    ]
+    if status.schedule:
+        lines.append(f"*Auto-sync:* `{status.schedule}` (UTC) · next {_utc(status.next_sync)}")
+    else:
+        lines.append("*Auto-sync:* off")
+    lines.append(f"*Store:* {kb.index.description}")
+    return "\n".join(lines)
+
+
+def make_bot(kb: KnowledgeBase) -> SlackBot:
     def sync() -> str:
-        logging.getLogger("pypdf").setLevel(logging.ERROR)
         try:
-            return ":white_check_mark: Sync done: " + summarize(sync_now(settings, vector_index))
+            return ":white_check_mark: Sync done: " + summarize(kb.sync("slack"))
+        except SyncBusy:
+            return ":hourglass_flowing_sand: A sync is already running; try again in a minute."
         except (DriveAuthError, SyncError) as exc:
             return f":warning: Sync failed: {exc}"
 
     return SlackBot(
-        agent,
-        settings.interfaces.slack,
-        status=lambda: status_text(settings, vector_index),
+        kb.agent(),
+        kb.settings.interfaces.slack,
+        status=lambda: status_text(kb),
         sync=sync,
-        feedback_path=settings.data_dir / FEEDBACK_FILE,
+        feedback_path=kb.settings.data_dir / FEEDBACK_FILE,
     )
 
 
-def run(settings: Settings, agent: DriveAgent, vector_index: VectorIndex) -> None:
-    """Start serving; blocks until interrupted."""
+def run(kb: KnowledgeBase) -> None:
+    """Serve Slack until interrupted. Auto-sync is the caller's choice (KnowledgeBase)."""
     from slack_bolt import App
 
-    tokens = required_tokens(settings)
-    slack = settings.interfaces.slack
+    tokens = required_tokens(kb.settings)
+    slack = kb.settings.interfaces.slack
     app: Any = App(
-        token=tokens["SLACK_BOT_TOKEN"],
-        signing_secret=tokens.get("SLACK_SIGNING_SECRET"),
+        token=tokens["SLACK_BOT_TOKEN"], signing_secret=tokens.get("SLACK_SIGNING_SECRET")
     )
-    register(app, make_bot(settings, agent, vector_index))
+    register(app, make_bot(kb))
     if slack.mode == "socket":
         from slack_bolt.adapter.socket_mode import SocketModeHandler
 

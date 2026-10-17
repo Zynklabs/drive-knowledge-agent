@@ -7,6 +7,15 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Auto-sync, owned by the agent: a new `KnowledgeBase` core object bundles the index, conversation memory, the agent and the index's freshness.
+  - Long-running hosts (Slack bot, web app, and the new `drive-agent sync --watch`) re-sync on `ingest.schedule_cron` / `SYNC_SCHEDULE` (cron, UTC, default every 6 hours, `off` to disable). They catch up immediately at startup when a scheduled run was missed.
+  - All syncs (scheduled, CLI, web app, `/drive-agent sync`) go through one coordinator, so they never overlap.
+  - `status` shows the next due sync, `ask` warns when the index is overdue, and the web app's Index page and the bot's `/drive-agent status` show the schedule.
+  - Long-running commands log with timestamps.
+- `SLACK_ADMIN_USERS=*` lets everyone run `/drive-agent sync`.
+
+### Changed
+- The CLI `ask` / `slack`, the web app and the Slack runner are all built on `KnowledgeBase` instead of wiring the index, LLM and checkpointer themselves.
 - Slack bot (M6), run with `drive-agent slack`:
   - Answers @mentions and DMs in-thread. A "Searching your Drive…" placeholder is updated as the answer streams (throttled to respect rate limits), and the final Block Kit reply has mrkdwn text, linked sources and 👍/👎 feedback (logged to `feedback.jsonl`). Each Slack thread is one conversation.
   - The `/drive-agent` command gives ephemeral answers and has `status`, `help` and admin-only `sync`.

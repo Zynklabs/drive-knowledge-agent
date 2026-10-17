@@ -7,8 +7,10 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import uuid
 import warnings
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -33,6 +35,7 @@ from drive_agent.vectorstores.location import describe_location, namespace_for
 
 if TYPE_CHECKING:
     from drive_agent.core.agent import AgentReply, DriveAgent
+    from drive_agent.core.knowledge_base import KnowledgeBase
     from drive_agent.drive.doctor import CheckResult
     from drive_agent.indexing.loader import FolderLoad
 
@@ -218,6 +221,26 @@ def _render_check(result: CheckResult, *, show_skipped: bool) -> None:
             console.print(table)
 
 
+def _watch(ctx: typer.Context, *, conflicting: bool) -> None:
+    if conflicting:
+        err_console.print("[red]--watch can't be combined with --dry-run or --full.[/red]")
+        raise typer.Exit(2)
+    settings = _settings(ctx)
+    if not settings.ingest.schedule_cron:
+        err_console.print("[red]Auto-sync is off.[/red] Set SYNC_SCHEDULE to a cron expression.")
+        raise typer.Exit(1)
+    kb = _open_knowledge_base(settings)
+    try:
+        _service_logging()
+        _announce_auto_sync(kb)
+        console.print(f"Watching {kb.index.description}. Ctrl+C to stop.")
+        _wait_forever()
+    except KeyboardInterrupt:
+        console.print("Stopped.")
+    finally:
+        kb.close()
+
+
 def _render_load(load: FolderLoad, show_chunks: int) -> None:
     console.print()
     if load.root is None or load.error:
@@ -276,8 +299,18 @@ def sync(
         int,
         typer.Option("--show-chunks", min=0, help="Print the first N chunks of each file."),
     ] = 0,
+    watch: Annotated[
+        bool,
+        typer.Option(
+            "--watch",
+            help="Keep running and re-sync on ingest.schedule_cron (catching up if overdue).",
+        ),
+    ] = False,
 ) -> None:
     """Index the configured Drive folders: embed new or changed chunks, remove stale ones."""
+    if watch:
+        _watch(ctx, conflicting=dry_run or full)
+        return
     from drive_agent.drive.auth import DriveAuthError, connect  # deferred: slow imports
     from drive_agent.indexing.loader import FileResult, load_folder
 
@@ -378,59 +411,85 @@ def ask(
     ] = None,
 ) -> None:
     """Ask questions about the indexed Drive files; answers cite their sources."""
-    from drive_agent.core.agent import (  # deferred: slow imports
-        DriveAgent,
-        make_retriever,
-        open_checkpointer,
-    )
-    from drive_agent.embeddings import build_embeddings
     from drive_agent.llm import LLMError
-    from drive_agent.llm.claude import ClaudeLLM
-    from drive_agent.vectorstores import VectorStoreError, build_vector_index
 
     settings = _settings(ctx)
-    warnings.filterwarnings("ignore", message="Failed to obtain server version")
+    kb = _open_knowledge_base(settings)
     try:
-        with console.status("Loading the index…"):
-            vector_index = build_vector_index(settings, build_embeddings(settings))
-    except (ConfigError, VectorStoreError) as exc:
-        err_console.print(f"[red]Setup error:[/red] {exc}")
-        raise typer.Exit(1) from exc
-
-    try:
-        if vector_index.count() == 0:
+        status = kb.status()
+        if status.chunks == 0:
             err_console.print("[yellow]The index is empty.[/yellow] Run `drive-agent sync` first.")
             raise typer.Exit(1)
-        llm = ClaudeLLM(settings)
-        retriever = make_retriever(vector_index.store)
-
-        with open_checkpointer(settings) as checkpointer:
-            agent = DriveAgent(settings, llm, retriever, checkpointer)
-            if question is not None:
-                reply = _answer(agent, question, thread)
-                console.print(
-                    f"[dim]Conversation {reply.thread_id} · continue with "
-                    f"--thread {reply.thread_id}[/dim]"
-                )
-                return
-            thread = thread or uuid.uuid4().hex[:12]
+        if status.overdue:
             console.print(
-                f"[dim]Chatting about your Drive (conversation {thread}). "
-                "Empty line or 'exit' to quit.[/dim]"
+                f"[yellow]⚠ The index was last synced {_ago(status.last_sync)} and a scheduled "
+                "sync is overdue. Run `drive-agent sync`, or keep `drive-agent sync --watch` "
+                "running to sync automatically.[/yellow]"
             )
-            while True:
-                try:
-                    line = console.input("[bold cyan]You:[/bold cyan] ").strip()
-                except EOFError:
-                    break
-                if not line or line.lower() in {"exit", "quit"}:
-                    break
-                _answer(agent, line, thread)
+        agent = kb.agent()
+        if question is not None:
+            reply = _answer(agent, question, thread)
+            console.print(
+                f"[dim]Conversation {reply.thread_id} · continue with "
+                f"--thread {reply.thread_id}[/dim]"
+            )
+            return
+        thread = thread or uuid.uuid4().hex[:12]
+        console.print(
+            f"[dim]Chatting about your Drive (conversation {thread}). "
+            "Empty line or 'exit' to quit.[/dim]"
+        )
+        while True:
+            try:
+                line = console.input("[bold cyan]You:[/bold cyan] ").strip()
+            except EOFError:
+                break
+            if not line or line.lower() in {"exit", "quit"}:
+                break
+            _answer(agent, line, thread)
     except (ConfigError, LLMError) as exc:
         err_console.print(f"\n[red]Error:[/red] {exc}")
         raise typer.Exit(1) from exc
     finally:
-        vector_index.close()
+        kb.close()
+
+
+def _open_knowledge_base(settings: Settings) -> KnowledgeBase:
+    from drive_agent.core.knowledge_base import KnowledgeBase  # deferred: slow imports
+    from drive_agent.vectorstores import VectorStoreError
+
+    warnings.filterwarnings("ignore", message="Failed to obtain server version")
+    try:
+        with console.status("Loading the index…"):
+            return KnowledgeBase.open(settings)
+    except (ConfigError, VectorStoreError) as exc:
+        err_console.print(f"[red]Setup error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+
+def _ago(moment: datetime | None) -> str:
+    if moment is None:
+        return "never"
+    hours = (datetime.now(UTC) - moment).total_seconds() / 3600
+    return f"{hours:.0f} hours ago" if hours < 48 else f"{hours / 24:.0f} days ago"
+
+
+def _utc(moment: datetime | None) -> str:
+    return moment.strftime("%Y-%m-%d %H:%M UTC") if moment else "never"
+
+
+def _service_logging() -> None:
+    """Timestamped logs for long-running commands (bot, watcher); quiet the chatty libraries."""
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    for noisy in ("httpx", "httpx2", "urllib3", "apscheduler", "slack_sdk.socket_mode"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+    logging.getLogger("pypdf").setLevel(logging.ERROR)
+
+
+def _wait_forever() -> None:
+    threading.Event().wait()
 
 
 def _answer(agent: DriveAgent, question: str, thread: str | None) -> AgentReply:
@@ -517,7 +576,10 @@ def ui(
 
 @app.command()
 def slack(ctx: typer.Context) -> None:
-    """Run the Slack bot (Socket Mode by default: no public URL needed)."""
+    """Run the Slack bot (Socket Mode by default: no public URL needed).
+
+    While it runs, the bot keeps its index fresh on ingest.schedule_cron (SYNC_SCHEDULE).
+    """
     settings = _settings(ctx)
     if importlib.util.find_spec("slack_bolt") is None:
         err_console.print(
@@ -525,43 +587,45 @@ def slack(ctx: typer.Context) -> None:
         )
         raise typer.Exit(1)
 
-    from drive_agent.core.agent import DriveAgent, create_checkpointer, make_retriever
-    from drive_agent.embeddings import build_embeddings
     from drive_agent.interfaces.slack_bot import runner
     from drive_agent.llm import LLMError
-    from drive_agent.llm.claude import ClaudeLLM
-    from drive_agent.vectorstores import VectorStoreError, build_vector_index
 
-    warnings.filterwarnings("ignore", message="Failed to obtain server version")
     try:
         runner.required_tokens(settings)
-        with console.status("Loading the index…"):
-            vector_index = build_vector_index(settings, build_embeddings(settings))
-    except (ConfigError, VectorStoreError) as exc:
+    except ConfigError as exc:
         err_console.print(f"[red]Setup error:[/red] {exc}")
         raise typer.Exit(1) from exc
-
+    kb = _open_knowledge_base(settings)
     try:
-        if vector_index.count() == 0:
-            console.print("[yellow]⚠ The index is empty; run `drive-agent sync` first.[/yellow]")
-        agent = DriveAgent(
-            settings,
-            ClaudeLLM(settings),
-            make_retriever(vector_index.store),
-            create_checkpointer(settings),
-        )
-        mode = settings.interfaces.slack.mode
+        if kb.status().chunks == 0:
+            console.print(
+                "[yellow]⚠ The index is empty; auto-sync or `drive-agent sync` fills it.[/yellow]"
+            )
+        _service_logging()
+        _announce_auto_sync(kb)
         console.print(
-            f"Slack bot running in {mode} mode · {vector_index.description}. Ctrl+C to stop."
+            f"Slack bot running in {settings.interfaces.slack.mode} mode · "
+            f"{kb.index.description}. Ctrl+C to stop."
         )
-        runner.run(settings, agent, vector_index)
+        runner.run(kb)
     except (ConfigError, LLMError) as exc:
         err_console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1) from exc
     except KeyboardInterrupt:
         console.print("Stopped.")
     finally:
-        vector_index.close()
+        kb.close()
+
+
+def _announce_auto_sync(kb: KnowledgeBase) -> None:
+    if kb.start_auto_sync():
+        status = kb.status()
+        console.print(
+            f"Auto-sync: `{status.schedule}` (UTC) · next {_utc(status.next_sync)}"
+            + (" · catching up now (overdue)" if status.overdue else "")
+        )
+    else:
+        console.print("Auto-sync: off (SYNC_SCHEDULE=off)")
 
 
 @app.command()
@@ -583,6 +647,7 @@ def status(ctx: typer.Context) -> None:
     table.add_row("answer model", settings.llm.answer_model)
     table.add_row("agent mode", settings.agent.mode)
     table.add_row("index", _index_summary(settings))
+    table.add_row("auto-sync", _auto_sync_summary(settings))
     console.print(table)
 
     secrets = settings.secrets.status()
@@ -720,3 +785,26 @@ def bot_list() -> None:
             settings.interfaces.slack.command,
         )
     console.print(table)
+
+
+def _auto_sync_summary(settings: Settings) -> str:
+    from drive_agent.core.knowledge_base import next_due
+    from drive_agent.indexing.scheduler import is_overdue
+    from drive_agent.indexing.state import STATE_DB, SQLiteRecordManager
+
+    schedule = settings.ingest.schedule_cron
+    if not schedule:
+        return "off"
+    last = None
+    db = settings.data_dir / STATE_DB
+    if db.is_file():
+        records = SQLiteRecordManager(namespace_for(settings), db)
+        try:
+            at = (records.get_meta("last_sync") or {}).get("at")
+        finally:
+            records.close()
+        last = datetime.fromisoformat(at) if at else None
+    due = (
+        "[yellow]overdue[/yellow]" if is_overdue(schedule, last) else _utc(next_due(schedule, last))
+    )
+    return f"`{schedule}` (UTC) · next due {due} · runs inside `slack`, `ui` and `sync --watch`"
