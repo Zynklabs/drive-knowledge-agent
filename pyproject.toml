@@ -67,6 +67,9 @@ voyage = [
 openai = [
     "langchain-openai>=0.3",
 ]
+streamlit = [
+    "streamlit>=1.40",
+]
 
 [dependency-groups]
 dev = [

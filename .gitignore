@@ -29,3 +29,6 @@ drive-agent.yaml
 .DS_Store
 .idea/
 .vscode/
+
+# Local editor/agent tooling
+.claude/

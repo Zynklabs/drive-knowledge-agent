@@ -247,6 +247,8 @@ class Secrets(BaseModel):
     langsmith_api_key: SecretStr | None = None
     langfuse_public_key: SecretStr | None = None
     langfuse_secret_key: SecretStr | None = None
+    ui_password: SecretStr | None = None
+    """Protects the Streamlit app when set (env UI_PASSWORD)."""
 
     @field_validator("*", mode="before")
     @classmethod
@@ -319,6 +321,11 @@ def _read_env(env_file: Path | None) -> dict[str, str]:
         env.update({k: v for k, v in dotenv_values(env_file).items() if v is not None})
     env.update(os.environ)
     return env
+
+
+def read_environment(env_file: Path | None = Path(".env")) -> dict[str, str]:
+    """The environment the loader sees: ``.env`` values overlaid by the process environment."""
+    return _read_env(env_file)
 
 
 def _env_layer(env: Mapping[str, str]) -> dict[str, Any]:

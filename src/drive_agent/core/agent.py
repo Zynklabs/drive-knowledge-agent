@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -12,7 +13,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 
 from drive_agent.core.config import ConfigError, Settings
-from drive_agent.graph.rag import Citation, Retriever, build_rag_graph
+from drive_agent.graph.rag import Citation, Retriever, Source, build_rag_graph
 from drive_agent.llm import LLM
 
 CONVERSATIONS_DB = "conversations.db"
@@ -23,24 +24,39 @@ class AgentReply:
     answer: str
     status: str
     citations: list[Citation] = field(default_factory=list)
+    sources: list[Source] = field(default_factory=list)
+    """Passages the answer was based on (after grading)."""
     query: str = ""
     thread_id: str = ""
 
 
-@contextmanager
-def open_checkpointer(settings: Settings) -> Iterator[BaseCheckpointSaver[Any]]:
-    """Conversation memory. ``sqlite`` keeps threads across runs in ``<data_dir>``."""
+def create_checkpointer(settings: Settings) -> BaseCheckpointSaver[Any]:
+    """Long-lived conversation memory, safe to share across threads (e.g. Streamlit sessions).
+
+    ``sqlite`` keeps threads across restarts in ``<data_dir>/conversations.db``.
+    """
     kind = settings.agent.checkpointer
     if kind == "memory":
-        yield InMemorySaver()
-    elif kind == "sqlite":
+        return InMemorySaver()
+    if kind == "sqlite":
         from langgraph.checkpoint.sqlite import SqliteSaver
 
         settings.data_dir.mkdir(parents=True, exist_ok=True)
-        with SqliteSaver.from_conn_string(str(settings.data_dir / CONVERSATIONS_DB)) as saver:
-            yield saver
-    else:
-        raise ConfigError(f"agent.checkpointer={kind} is not supported yet; use sqlite or memory")
+        conn = sqlite3.connect(settings.data_dir / CONVERSATIONS_DB, check_same_thread=False)
+        return SqliteSaver(conn)
+    raise ConfigError(f"agent.checkpointer={kind} is not supported yet; use sqlite or memory")
+
+
+@contextmanager
+def open_checkpointer(settings: Settings) -> Iterator[BaseCheckpointSaver[Any]]:
+    """``create_checkpointer`` for one-shot use (CLI); closes the database afterwards."""
+    saver = create_checkpointer(settings)
+    try:
+        yield saver
+    finally:
+        conn = getattr(saver, "conn", None)
+        if conn is not None:
+            conn.close()
 
 
 class DriveAgent:
@@ -77,6 +93,7 @@ class DriveAgent:
             answer=state.get("answer", ""),
             status=state.get("status", ""),
             citations=state.get("citations", []),
+            sources=state.get("sources", []),
             query=state.get("query", ""),
             thread_id=thread_id,
         )

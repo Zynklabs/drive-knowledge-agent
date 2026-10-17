@@ -112,7 +112,6 @@ def test_bad_config_exits_with_message(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize(
     ("args", "milestone"),
     [
-        (["ui"], "M5"),
         (["slack"], "M6"),
     ],
 )

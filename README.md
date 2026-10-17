@@ -7,7 +7,7 @@ An open-source agent that indexes a Google Drive folder (including every sub-fol
 - **Open-source embeddings by default.** `nomic-embed-text-v1.5` (Apache-2.0) runs locally via FastEmbed, so document text never leaves your machine during indexing.
 - **Claude** is the default answer model.
 
-> **Status: pre-alpha (M4).** Index a Drive folder (`sync`) and ask questions with cited answers (`ask`) from the CLI. Streamlit and Slack are next. See the [roadmap](#roadmap).
+> **Status: pre-alpha (M5).** Index a Drive folder and ask questions with cited answers from the CLI or the Streamlit web app. The Slack bot is next. See the [roadmap](#roadmap).
 
 ## Supported files
 
@@ -89,6 +89,21 @@ Claude credentials: set `ANTHROPIC_API_KEY` in `.env`, or sign in once with `ant
 | `ask` | Your question, recent conversation turns, the ~20 retrieved chunks (for grading) and the kept chunks (for the answer) | The Claude API (via OpenRouter if `LLM_PROVIDER=openrouter`) |
 | `ask` | Questions and answers | `.drive-agent/conversations.db` on this machine |
 
+## Web app (Streamlit)
+
+```bash
+pip install 'drive-knowledge-agent[streamlit]'   # or: uv sync --all-extras
+drive-agent ui                                   # http://localhost:8501
+```
+
+| Page | What it does |
+|---|---|
+| **Chat** | Streams answers, shows citation cards with **Open** links to the Drive files, and has a "Retrieved passages" view. Each browser session is its own conversation, and "New conversation" starts a fresh one. |
+| **Index** | Shows index size and last sync. **Sync now** streams per-file progress; **Full rebuild** must be confirmed first. |
+| **Setup** | Shows the resolved configuration and which secrets are set (names only), lets you edit Drive folders, and has a **Check Drive access** button. |
+
+The app binds to `localhost` by default. To serve it to others (`drive-agent ui --host 0.0.0.0`), set `UI_PASSWORD` first: everyone who can open the app can query everything the agent indexed. Streamlit usage statistics are turned off.
+
 ## Configuration
 
 Settings are layered, lowest to highest priority:
@@ -109,7 +124,7 @@ Secrets (API keys, tokens, database URLs) are read **only** from the environment
 | `drive-agent sync --dry-run [--show-chunks N]` | Fetch, parse and chunk; report per file, write nothing | M2 ✅ |
 | `drive-agent sync [--full]` | Index into Qdrant; re-runs only embed new or changed chunks and remove stale ones | M3 ✅ |
 | `drive-agent ask ["…"] [--thread ID]` | Cited answers; interactive chat without a question | M4 ✅ |
-| `drive-agent ui` | Streamlit app | M5 |
+| `drive-agent ui [--port N] [--host H] [--no-browser]` | Streamlit app | M5 ✅ |
 | `drive-agent slack` | Slack bot | M6 |
 
 ## Roadmap

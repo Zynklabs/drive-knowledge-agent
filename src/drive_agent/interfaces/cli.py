@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import importlib.util
 import logging
+import os
+import subprocess
+import sys
 import uuid
 import warnings
 from pathlib import Path
@@ -15,6 +19,7 @@ from rich.table import Table
 
 from drive_agent import __version__
 from drive_agent.core.config import (
+    CONFIG_ENV_VAR,
     DEFAULT_CONFIG_FILE,
     ConfigError,
     Settings,
@@ -442,10 +447,44 @@ def _answer(agent: DriveAgent, question: str, thread: str | None) -> AgentReply:
 
 
 @app.command()
-def ui(ctx: typer.Context) -> None:
-    """Launch the Streamlit app."""
-    _settings(ctx)
-    _not_implemented("ui", "M5")
+def ui(
+    ctx: typer.Context,
+    port: Annotated[int, typer.Option(help="Port to serve on.")] = 8501,
+    host: Annotated[
+        str, typer.Option(help="Address to bind; use 0.0.0.0 only behind a password.")
+    ] = "localhost",
+    no_browser: Annotated[
+        bool, typer.Option("--no-browser", help="Don't open a browser tab automatically.")
+    ] = False,
+) -> None:
+    """Launch the Streamlit app (Chat, Index and Setup pages)."""
+    settings = _settings(ctx)
+    if importlib.util.find_spec("streamlit") is None:
+        err_console.print(
+            "[red]Streamlit is not installed.[/red] pip install 'drive-knowledge-agent[streamlit]'"
+        )
+        raise typer.Exit(1)
+    if host not in {"localhost", "127.0.0.1"} and settings.secrets.ui_password is None:
+        err_console.print(
+            "[yellow]⚠ Serving beyond localhost without UI_PASSWORD: anyone who can reach this "
+            "address can query your Drive index.[/yellow]"
+        )
+
+    from drive_agent.interfaces import streamlit_app
+
+    app_path = Path(streamlit_app.__file__).with_name("app.py")
+    env = dict(os.environ)
+    if ctx.obj["config"] is not None:
+        env[CONFIG_ENV_VAR] = str(Path(ctx.obj["config"]).resolve())
+    command = [
+        sys.executable, "-m", "streamlit", "run", str(app_path),
+        "--server.port", str(port),
+        "--server.address", host,
+        "--browser.gatherUsageStats", "false",
+        "--server.headless", "true" if no_browser else "false",
+        "--client.toolbarMode", "minimal",  # hide Streamlit's developer/deploy menu
+    ]  # fmt: skip
+    raise typer.Exit(subprocess.call(command, env=env))  # noqa: S603 - fixed argv, no shell
 
 
 @app.command()

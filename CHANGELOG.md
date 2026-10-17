@@ -7,6 +7,12 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Streamlit web app (M5), launched with `drive-agent ui`:
+  - **Chat** streams answers, shows citation cards with links to Drive and a retrieved-passages view, and keeps each browser session's conversation in the shared SQLite checkpointer.
+  - **Index** shows status and runs sync or a confirmed full rebuild with live per-file progress.
+  - **Setup** shows the resolved config and which secrets are set, edits folders (and says when `.env` manages them), and runs the Drive access check.
+  - An optional `UI_PASSWORD` gate. The launcher warns when the app is served beyond localhost without one, and Streamlit telemetry and the deploy menu are off.
+- `AgentReply.sources` (the passages an answer used) and a thread-safe `create_checkpointer`.
 - Question answering (M4): `drive-agent ask` runs a LangGraph RAG graph. It rewrites follow-ups into standalone queries, runs a hybrid search (dense + BM25, RRF inside Qdrant), grades relevance with a corrective retry, then streams a grounded answer from Claude with `[n]` citations linked to Drive files and pages. Conversation memory is kept per `--thread` (SQLite checkpointer), and running `ask` with no question opens an interactive chat.
 - Claude via the official `anthropic` SDK. The answer model `claude-opus-5-5` runs at explicit effort with `fallbacks="default"` (server-side refusal fallback). Query rewriting and grading use `claude-haiku-5-5` with structured outputs. Missing credentials, rate limits and network errors get clear messages.
 - Hybrid retrieval: the collection stores BM25 sparse vectors (FastEmbed `Qdrant/bm25`) next to the dense vectors. Older collections are detected and need `sync --full`, which now recreates the collection.
