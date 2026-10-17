@@ -7,6 +7,12 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Question answering (M4): `drive-agent ask` runs a LangGraph RAG graph. It rewrites follow-ups into standalone queries, runs a hybrid search (dense + BM25, RRF inside Qdrant), grades relevance with a corrective retry, then streams a grounded answer from Claude with `[n]` citations linked to Drive files and pages. Conversation memory is kept per `--thread` (SQLite checkpointer), and running `ask` with no question opens an interactive chat.
+- Claude via the official `anthropic` SDK. The answer model `claude-opus-5-5` runs at explicit effort with `fallbacks="default"` (server-side refusal fallback). Query rewriting and grading use `claude-haiku-5-5` with structured outputs. Missing credentials, rate limits and network errors get clear messages.
+- Hybrid retrieval: the collection stores BM25 sparse vectors (FastEmbed `Qdrant/bm25`) next to the dense vectors. Older collections are detected and need `sync --full`, which now recreates the collection.
+
+### Changed
+- Defaults: `llm.answer_model=claude-opus-5-5`, `retrieval.top_k=20`, `agent.mode=rag` (agentic mode is planned). Removed the unimplemented `retrieval.rerank`; added `retrieval.grade`, `llm.answer_effort` and `llm.fast_effort`.
 - Indexing (M3): `drive-agent sync` embeds chunks and stores them in Qdrant. The Qdrant server URL is set with `QDRANT_URL`/`QDRANT_API_KEY`; without a URL Qdrant runs embedded on disk, and `:memory:` is used for tests. Default embeddings are open source and local (`nomic-embed-text-v1.5` via FastEmbed, with task prefixes applied); Voyage and OpenAI are optional extras.
 - Incremental re-sync through LangChain's indexing API with a SQLite record manager. Unchanged chunks are skipped, changed files have their chunks replaced, and files that vanish or stop yielding text are pruned. A file that fails to fetch keeps its previous chunks, and pruning is skipped if any folder fails to read. Changing the embedding model requires `sync --full`. Chunk IDs are SHA-256 based UUIDs, which Qdrant accepts.
 - `drive-agent status` shows index size, last sync time, and the embedding model.

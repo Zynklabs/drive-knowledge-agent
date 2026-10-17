@@ -59,14 +59,14 @@ def test_init_keeps_existing_env_file() -> None:
 
 
 def test_init_refuses_to_overwrite_without_force() -> None:
-    Path("drive-agent.yaml").write_text("agent: {mode: rag}\n")
+    Path("drive-agent.yaml").write_text("agent: {mode: agentic}\n")
     result = runner.invoke(app, ["init", "--folder", FOLDER, "--auth-mode", "oauth"])
     assert result.exit_code == 1
     assert "already exists" in result.output
 
     result = runner.invoke(app, ["init", "--folder", FOLDER, "--auth-mode", "oauth", "--force"])
     assert result.exit_code == 0, result.output
-    assert load_settings(env={}).agent.mode == "auto"
+    assert load_settings(env={}).agent.mode == "rag"
 
 
 @pytest.mark.parametrize(
@@ -112,7 +112,6 @@ def test_bad_config_exits_with_message(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize(
     ("args", "milestone"),
     [
-        (["ask", "What is our leave policy?"], "M4"),
         (["ui"], "M5"),
         (["slack"], "M6"),
     ],
@@ -289,3 +288,100 @@ def test_sync_setup_errors(monkeypatch: pytest.MonkeyPatch, sa_key_file: Path) -
 def test_status_before_any_sync() -> None:
     result = runner.invoke(app, ["status"])
     assert "not built yet" in result.output
+
+
+# --- ask --------------------------------------------------------------------
+
+
+@pytest.fixture
+def synced(monkeypatch: pytest.MonkeyPatch, sa_key_file: Path) -> list[object]:
+    """Sync one fake CV into embedded Qdrant and swap Claude for a scripted fake."""
+    from langchain_core.embeddings import DeterministicFakeEmbedding
+
+    import drive_agent.embeddings
+    import drive_agent.llm.claude
+    from drive_agent.drive.fetcher import DriveFetcher
+
+    from .doc_factory import make_pdf
+    from .fake_drive import fake_download
+    from .fakes import FakeLLM
+
+    monkeypatch.setattr(DriveFetcher, "_download", fake_download)
+    monkeypatch.setattr(
+        drive_agent.embeddings, "build_embeddings", lambda s: DeterministicFakeEmbedding(size=8)
+    )
+    drive = FakeDrive(
+        [folder("root", "Hiring"), file("cv", "Jane.pdf", "application/pdf", "root", size=10)],
+        contents={"cv": make_pdf(["Jane Doe knows Go"])},
+    )
+    _use_fake_drive(monkeypatch, sa_key_file, drive)
+    monkeypatch.setenv("DRIVE_FOLDER_IDS", "root")
+    assert runner.invoke(app, ["sync"]).exit_code == 0
+
+    llms: list[object] = []
+
+    def make_llm(settings: object) -> FakeLLM:
+        llms.append(fake := FakeLLM(answer="Jane Doe knows Go [1]."))
+        return fake
+
+    monkeypatch.setattr(drive_agent.llm.claude, "ClaudeLLM", make_llm)
+    return llms
+
+
+def test_ask_one_off_prints_answer_and_sources(synced: list[object]) -> None:
+    result = runner.invoke(app, ["ask", "Who knows Go?"])
+    assert result.exit_code == 0, result.output
+    assert "Agent: Jane Doe knows Go [1]." in result.output
+    assert "Sources" in result.output
+    assert "[1] Jane.pdf, page 1" in result.output
+    assert "continue with --thread" in result.output
+
+
+def test_ask_thread_continues_conversation(synced: list[object]) -> None:
+    from .fakes import FakeLLM
+
+    first = runner.invoke(app, ["ask", "Who knows Go?", "--thread", "hiring"])
+    assert first.exit_code == 0, first.output
+    second = runner.invoke(app, ["ask", "And Kubernetes?", "--thread", "hiring"])
+    assert second.exit_code == 0, second.output
+    llm = synced[-1]
+    assert isinstance(llm, FakeLLM)
+    roles = [m["role"] for m in llm.answer_calls[-1][1]]
+    assert roles == ["user", "assistant", "user"]  # history persisted in conversations.db
+    assert Path(".drive-agent/conversations.db").is_file()
+
+
+def test_ask_interactive_chat(synced: list[object]) -> None:
+    result = runner.invoke(app, ["ask"], input="Who knows Go?\nexit\n")
+    assert result.exit_code == 0, result.output
+    assert "Chatting about your Drive" in result.output
+    assert result.output.count("Agent:") == 1
+
+
+def test_ask_with_empty_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    from langchain_core.embeddings import DeterministicFakeEmbedding
+
+    import drive_agent.embeddings
+
+    monkeypatch.setattr(
+        drive_agent.embeddings, "build_embeddings", lambda s: DeterministicFakeEmbedding(size=8)
+    )
+    result = runner.invoke(app, ["ask", "anything"])
+    assert result.exit_code == 1
+    assert "index is empty" in result.output
+
+
+def test_ask_reports_claude_errors(synced: list[object], monkeypatch: pytest.MonkeyPatch) -> None:
+    import drive_agent.llm.claude
+    from drive_agent.llm.claude import MISSING_CREDENTIALS, LLMError
+
+    class NoCreds:
+        def __init__(self, settings: object) -> None: ...
+
+        def structured(self, *args: object) -> None:
+            raise LLMError(MISSING_CREDENTIALS)
+
+    monkeypatch.setattr(drive_agent.llm.claude, "ClaudeLLM", NoCreds)
+    result = runner.invoke(app, ["ask", "Who knows Go?"])
+    assert result.exit_code == 1
+    assert "No Claude credentials found" in result.output

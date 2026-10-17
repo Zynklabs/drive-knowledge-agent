@@ -59,11 +59,13 @@ def test_defaults_match_spec() -> None:
     assert s.embeddings.model == "nomic-ai/nomic-embed-text-v1.5"
     assert s.vector_store.provider == "qdrant"
     assert s.vector_store.url is None
-    assert s.retrieval.top_k == 30
+    assert s.retrieval.top_k == 20
+    assert s.retrieval.hybrid is True
     assert s.retrieval.final_k == 8
-    assert s.llm.answer_model == "claude-sonnet-5-5"
+    assert s.llm.answer_model == "claude-opus-5-5"
+    assert s.llm.answer_effort == "medium"
     assert s.llm.fast_model == "claude-haiku-5-5"
-    assert s.agent.mode == "auto"
+    assert s.agent.mode == "rag"
 
 
 def test_yaml_layer(tmp_path: Path) -> None:
@@ -79,9 +81,9 @@ def test_yaml_layer(tmp_path: Path) -> None:
 
 
 def test_default_config_file_in_cwd_is_used() -> None:
-    write_yaml(Path("drive-agent.yaml"), {"agent": {"mode": "rag"}})
+    write_yaml(Path("drive-agent.yaml"), {"agent": {"mode": "auto"}})
     s = load_settings(env={})
-    assert s.agent.mode == "rag"
+    assert s.agent.mode == "auto"
     assert s.source_file == Path("drive-agent.yaml")
 
 

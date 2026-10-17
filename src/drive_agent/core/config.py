@@ -177,10 +177,14 @@ class VectorStoreSettings(_Section):
 
 
 class RetrievalSettings(_Section):
-    top_k: int = Field(default=30, gt=0)
-    rerank: bool = True
+    top_k: int = Field(default=20, gt=0)
+    """Candidates retrieved per question (then graded by the fast model)."""
     final_k: int = Field(default=8, gt=0)
+    """Most sources passed to the answer model."""
     hybrid: bool = True
+    """Dense vectors + BM25 keyword vectors fused with RRF. Changing it needs `sync --full`."""
+    grade: bool = True
+    """Let the fast model drop irrelevant chunks and retry with a reworded query once."""
 
     @model_validator(mode="after")
     def _final_within_top(self) -> Self:
@@ -189,14 +193,20 @@ class RetrievalSettings(_Section):
         return self
 
 
+Effort = Literal["low", "medium", "high", "xhigh", "max"]
+
+
 class LLMSettings(_Section):
     provider: Literal["anthropic"] = "anthropic"
-    answer_model: str = "claude-sonnet-5-5"
+    answer_model: str = "claude-opus-5-5"
+    answer_effort: Effort = "medium"
     fast_model: str = "claude-haiku-5-5"
+    """Query rewriting and relevance grading."""
+    fast_effort: Effort = "low"
 
 
 class AgentSettings(_Section):
-    mode: Literal["rag", "agentic", "auto"] = "auto"
+    mode: Literal["rag", "agentic", "auto"] = "rag"  # agentic/auto: planned (M7)
     checkpointer: Literal["memory", "sqlite", "postgres"] = "sqlite"
 
 

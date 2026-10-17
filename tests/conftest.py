@@ -56,6 +56,16 @@ def oauth_client_file(tmp_path: Path) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def offline_bm25(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never download the BM25 model in tests; use a deterministic bag-of-words encoder."""
+    from drive_agent.vectorstores import qdrant
+
+    from .fakes import FakeSparse
+
+    monkeypatch.setattr(qdrant, "_bm25", lambda settings: FakeSparse())
+
+
+@pytest.fixture(autouse=True)
 def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Run every test in an empty directory with no drive-agent env vars set."""
     import os

@@ -62,7 +62,9 @@ def chunk_key(doc: Document) -> str:
 
 
 def embedding_fingerprint(settings: Settings) -> str:
-    return f"{settings.embeddings.provider}:{settings.embeddings.model}"
+    """What the stored vectors were built with; any change requires `sync --full`."""
+    suffix = "+bm25" if settings.retrieval.hybrid else ""
+    return f"{settings.embeddings.provider}:{settings.embeddings.model}{suffix}"
 
 
 def run_sync(

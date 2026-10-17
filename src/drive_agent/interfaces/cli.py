@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
+import uuid
 import warnings
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 import yaml
@@ -24,6 +25,7 @@ from drive_agent.drive.models import SKIP_LABELS
 from drive_agent.vectorstores.location import describe_location, namespace_for
 
 if TYPE_CHECKING:
+    from drive_agent.core.agent import AgentReply, DriveAgent
     from drive_agent.drive.doctor import CheckResult
     from drive_agent.indexing.loader import FolderLoad
 
@@ -290,7 +292,7 @@ def sync(
     try:
         with console.status(f"Loading embeddings {fingerprint} (first run downloads the model)…"):
             embeddings = build_embeddings(settings)
-            vector_index = build_vector_index(settings, embeddings)
+            vector_index = build_vector_index(settings, embeddings, recreate=full)
     except (ConfigError, VectorStoreError) as exc:
         err_console.print(f"[red]Setup error:[/red] {exc}")
         raise typer.Exit(1) from exc
@@ -335,10 +337,108 @@ def sync(
 
 
 @app.command()
-def ask(ctx: typer.Context, question: Annotated[str, typer.Argument()]) -> None:
-    """Ask a one-off question."""
-    _settings(ctx)
-    _not_implemented("ask", "M4")
+def ask(
+    ctx: typer.Context,
+    question: Annotated[
+        str | None, typer.Argument(help="Your question. Omit it to start an interactive chat.")
+    ] = None,
+    thread: Annotated[
+        str | None,
+        typer.Option("--thread", help="Conversation id to continue (default: a new one)."),
+    ] = None,
+) -> None:
+    """Ask questions about the indexed Drive files; answers cite their sources."""
+    from drive_agent.core.agent import DriveAgent, open_checkpointer  # deferred: slow imports
+    from drive_agent.embeddings import build_embeddings
+    from drive_agent.llm import LLMError
+    from drive_agent.llm.claude import ClaudeLLM
+    from drive_agent.vectorstores import VectorStoreError, build_vector_index
+
+    settings = _settings(ctx)
+    warnings.filterwarnings("ignore", message="Failed to obtain server version")
+    try:
+        with console.status("Loading the index…"):
+            vector_index = build_vector_index(settings, build_embeddings(settings))
+    except (ConfigError, VectorStoreError) as exc:
+        err_console.print(f"[red]Setup error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+    try:
+        if vector_index.count() == 0:
+            err_console.print("[yellow]The index is empty.[/yellow] Run `drive-agent sync` first.")
+            raise typer.Exit(1)
+        llm = ClaudeLLM(settings)
+        store = vector_index.store
+
+        def retriever(query: str, k: int) -> list[Any]:
+            return store.similarity_search(query, k=k)
+
+        with open_checkpointer(settings) as checkpointer:
+            agent = DriveAgent(settings, llm, retriever, checkpointer)
+            if question is not None:
+                reply = _answer(agent, question, thread)
+                console.print(
+                    f"[dim]Conversation {reply.thread_id} · continue with "
+                    f"--thread {reply.thread_id}[/dim]"
+                )
+                return
+            thread = thread or uuid.uuid4().hex[:12]
+            console.print(
+                f"[dim]Chatting about your Drive (conversation {thread}). "
+                "Empty line or 'exit' to quit.[/dim]"
+            )
+            while True:
+                try:
+                    line = console.input("[bold cyan]You:[/bold cyan] ").strip()
+                except EOFError:
+                    break
+                if not line or line.lower() in {"exit", "quit"}:
+                    break
+                _answer(agent, line, thread)
+    except (ConfigError, LLMError) as exc:
+        err_console.print(f"\n[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+    finally:
+        vector_index.close()
+
+
+def _answer(agent: DriveAgent, question: str, thread: str | None) -> AgentReply:
+    started = False
+
+    def on_text(text: str) -> None:
+        nonlocal started
+        if not started:  # print the prefix only once the answer actually starts
+            console.print("[bold green]Agent:[/bold green] ", end="")
+            started = True
+        console.print(text, end="", markup=False, highlight=False)
+
+    with console.status("Searching your Drive…") as status:
+
+        def first_token(text: str) -> None:
+            status.stop()
+            on_text(text)
+
+        reply = agent.ask(question, thread_id=thread, on_text=first_token)
+    console.print()
+    if reply.citations:
+        console.print("[bold]Sources[/bold]")
+        for citation in reply.citations:
+            where = (
+                f", page {citation['page']}"
+                if "page" in citation
+                else f", slide {citation['slide']}"
+                if "slide" in citation
+                else f" > {citation['section']}"
+                if "section" in citation
+                else ""
+            )
+            link = f"  [dim]{citation['web_url']}[/dim]" if "web_url" in citation else ""
+            console.print(
+                f"  [{citation['number']}] {citation.get('file_name', '?')}{where}{link}",
+                highlight=False,
+            )
+    console.print()
+    return reply
 
 
 @app.command()

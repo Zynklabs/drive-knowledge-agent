@@ -71,7 +71,7 @@ def test_first_sync_indexes_everything(env: Env) -> None:
     assert {"chunk_id", "path", "web_url"} - {"web_url"} <= hit[0].metadata.keys()
     last = env.records.get_meta("last_sync")
     assert (last["files"], last["chunks"], last["failed"]) == (2, 4, 0)
-    assert env.records.get_meta("embedding") == "local:nomic-ai/nomic-embed-text-v1.5"
+    assert env.records.get_meta("embedding") == "local:nomic-ai/nomic-embed-text-v1.5+bm25"
 
 
 def test_resync_is_a_no_op(env: Env) -> None:
@@ -145,7 +145,7 @@ def test_embedding_change_requires_full_rebuild(env: Env) -> None:
     report = env.sync(full=True)
     assert report.added == 4
     assert env.index.count() == 4
-    assert env.records.get_meta("embedding") == "local:nomic-ai/nomic-embed-text-v1.5"
+    assert env.records.get_meta("embedding") == "local:nomic-ai/nomic-embed-text-v1.5+bm25"
 
 
 def test_full_rebuild_reembeds_everything(env: Env) -> None:
@@ -182,3 +182,16 @@ def test_chunk_key_is_a_stable_uuid() -> None:
     other = Document("text", metadata={"file_id": "F", "page": 2})
     assert chunk_key(a) == chunk_key(same) != chunk_key(other)
     assert str(uuid.UUID(chunk_key(a))) == chunk_key(a)
+
+
+def test_toggling_hybrid_requires_full_rebuild(env: Env) -> None:
+    from drive_agent.indexing.sync import embedding_fingerprint
+
+    env.sync()
+    dense_only = env.settings.model_copy(
+        update={"retrieval": env.settings.retrieval.model_copy(update={"hybrid": False})}
+    )
+    assert embedding_fingerprint(dense_only) == "local:nomic-ai/nomic-embed-text-v1.5"
+    env.settings = dense_only
+    with pytest.raises(SyncError, match="sync --full"):
+        env.sync()
