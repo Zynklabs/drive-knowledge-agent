@@ -109,19 +109,6 @@ def test_bad_config_exits_with_message(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "Config error" in result.output
 
 
-@pytest.mark.parametrize(
-    ("args", "milestone"),
-    [
-        (["slack"], "M6"),
-    ],
-)
-def test_unimplemented_commands(args: list[str], milestone: str) -> None:
-    result = runner.invoke(app, args)
-    assert result.exit_code == 1
-    assert "not implemented yet" in result.output
-    assert milestone in result.output
-
-
 # --- check ------------------------------------------------------------------
 
 DOC = "application/vnd.google-apps.document"

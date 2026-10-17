@@ -7,7 +7,7 @@ An open-source agent that indexes a Google Drive folder (including every sub-fol
 - **Open-source embeddings by default.** `nomic-embed-text-v1.5` (Apache-2.0) runs locally via FastEmbed, so document text never leaves your machine during indexing.
 - **Claude** is the default answer model.
 
-> **Status: pre-alpha (M5).** Index a Drive folder and ask questions with cited answers from the CLI or the Streamlit web app. The Slack bot is next. See the [roadmap](#roadmap).
+> **Status: pre-alpha (M6).** Index Drive folders and ask questions with cited answers from the CLI, the Streamlit web app, or Slack, with one bot per folder. See the [roadmap](#roadmap).
 
 ## Supported files
 
@@ -104,6 +104,15 @@ drive-agent ui                                   # http://localhost:8501
 
 The app binds to `localhost` by default. To serve it to others (`drive-agent ui --host 0.0.0.0`), set `UI_PASSWORD` first: everyone who can open the app can query everything the agent indexed. Streamlit usage statistics are turned off.
 
+## Slack bot
+
+```bash
+pip install 'drive-knowledge-agent[slack]'
+drive-agent slack          # Socket Mode: no public URL needed
+```
+
+Mention the bot or DM it: it answers in the thread with linked sources and 👍/👎 feedback, and it remembers the thread's conversation. `/drive-agent <question>` gives a private answer. **One bot per Drive folder:** `drive-agent bot add hr --folder <url>` creates a separate bot with its own index and Slack app, and you run it with `drive-agent --bot hr slack`. Full setup, including the Slack app manifest: **[docs/slack-setup.md](docs/slack-setup.md)**.
+
 ## Configuration
 
 Settings are layered, lowest to highest priority:
@@ -125,7 +134,8 @@ Secrets (API keys, tokens, database URLs) are read **only** from the environment
 | `drive-agent sync [--full]` | Index into Qdrant; re-runs only embed new or changed chunks and remove stale ones | M3 ✅ |
 | `drive-agent ask ["…"] [--thread ID]` | Cited answers; interactive chat without a question | M4 ✅ |
 | `drive-agent ui [--port N] [--host H] [--no-browser]` | Streamlit app | M5 ✅ |
-| `drive-agent slack` | Slack bot | M6 |
+| `drive-agent slack` | Slack bot (Socket or HTTP mode) | M6 ✅ |
+| `drive-agent bot add NAME --folder URL` / `bot list` | One bot per Drive folder; select one with `--bot NAME` on any command | M6 ✅ |
 
 ## Roadmap
 

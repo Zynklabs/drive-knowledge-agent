@@ -195,3 +195,12 @@ def test_toggling_hybrid_requires_full_rebuild(env: Env) -> None:
     env.settings = dense_only
     with pytest.raises(SyncError, match="sync --full"):
         env.sync()
+
+
+def test_summarize() -> None:
+    from drive_agent.indexing.sync import SyncReport, summarize
+
+    assert summarize(SyncReport(added=2, unchanged=5, seconds=1.5)) == (
+        "+2 added · 0 updated · 5 unchanged · 0 deleted · 1.5s"
+    )
+    assert "(1 files removed)" in summarize(SyncReport(deleted=3, pruned_files=1))

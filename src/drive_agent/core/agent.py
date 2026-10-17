@@ -9,6 +9,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, cast
 
+from langchain_core.documents import Document
+from langchain_core.vectorstores import VectorStore
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 
@@ -17,6 +19,15 @@ from drive_agent.graph.rag import Citation, Retriever, Source, build_rag_graph
 from drive_agent.llm import LLM
 
 CONVERSATIONS_DB = "conversations.db"
+
+
+def make_retriever(store: VectorStore) -> Retriever:
+    """The graph's retriever over a LangChain vector store (hybrid when the store is)."""
+
+    def retrieve(query: str, k: int) -> list[Document]:
+        return store.similarity_search(query, k=k)
+
+    return retrieve
 
 
 @dataclass

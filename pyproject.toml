@@ -70,6 +70,9 @@ openai = [
 streamlit = [
     "streamlit>=1.40",
 ]
+slack = [
+    "slack-bolt>=1.21",
+]
 
 [dependency-groups]
 dev = [
@@ -113,6 +116,12 @@ ignore_missing_imports = true
 # google-auth ships py.typed but leaves many functions unannotated.
 [[tool.mypy.overrides]]
 module = ["drive_agent.drive.auth"]
+disallow_untyped_calls = false
+
+# Slack Bolt's decorators and App.start are unannotated.
+[[tool.mypy.overrides]]
+module = ["drive_agent.interfaces.slack_bot.*"]
+disallow_untyped_decorators = false
 disallow_untyped_calls = false
 
 [tool.pydantic-mypy]

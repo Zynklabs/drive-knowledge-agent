@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Slack bot (M6), run with `drive-agent slack`:
+  - Answers @mentions and DMs in-thread. A "Searching your Drive…" placeholder is updated as the answer streams (throttled to respect rate limits), and the final Block Kit reply has mrkdwn text, linked sources and 👍/👎 feedback (logged to `feedback.jsonl`). Each Slack thread is one conversation.
+  - The `/drive-agent` command gives ephemeral answers and has `status`, `help` and admin-only `sync`.
+  - Duplicate event deliveries are ignored, bot messages are skipped, and a channel allow-list and DM toggle are available.
+  - Runs in Socket Mode (default) or HTTP mode, from a minimal-scope Slack app manifest (`slack/manifest.yaml`). Setup guide: `docs/slack-setup.md`.
+- One bot per Drive folder: `drive-agent bot add NAME --folder URL` writes `bots/NAME.env` (folder, its own Qdrant collection, its own state directory, its own slash command and empty Slack token slots; mode 0600, gitignored) and a per-bot Slack manifest. `drive-agent bot list` shows all bots. The global `--bot NAME` / `--env-file PATH` options layer that file over the shared `.env` for any command, including `ui`.
+- `sync_now()` and `summarize()` are shared by the web app and Slack, and `make_retriever()` is shared by the CLI, web app and Slack.
 - Streamlit web app (M5), launched with `drive-agent ui`:
   - **Chat** streams answers, shows citation cards with links to Drive and a retrieved-passages view, and keeps each browser session's conversation in the shared SQLite checkpointer.
   - **Index** shows status and runs sync or a confirmed full rebuild with live per-file progress.

@@ -10,7 +10,7 @@ import sys
 import uuid
 import warnings
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 import yaml
@@ -21,8 +21,10 @@ from drive_agent import __version__
 from drive_agent.core.config import (
     CONFIG_ENV_VAR,
     DEFAULT_CONFIG_FILE,
+    EXTRA_ENV_VAR,
     ConfigError,
     Settings,
+    bot_env_file,
     extract_folder_id,
     load_settings,
 )
@@ -72,17 +74,40 @@ def main(
         Path | None,
         typer.Option("--config", "-c", help="Path to drive-agent.yaml.", dir_okay=False),
     ] = None,
+    bot: Annotated[
+        str | None,
+        typer.Option("--bot", "-b", help="Use bots/<name>.env (one bot per Drive folder)."),
+    ] = None,
+    env_file: Annotated[
+        Path | None,
+        typer.Option("--env-file", help="Extra env file layered over .env.", dir_okay=False),
+    ] = None,
     version: Annotated[
         bool,
         typer.Option("--version", callback=_version, is_eager=True, help="Show version and exit."),
     ] = False,
 ) -> None:
-    ctx.obj = {"config": config}
+    if bot is not None and env_file is not None:
+        err_console.print("[red]Use either --bot or --env-file, not both.[/red]")
+        raise typer.Exit(2)
+    if bot is not None:
+        try:
+            env_file = bot_env_file(bot)
+        except ConfigError as exc:
+            err_console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(2) from exc
+        if not env_file.is_file():
+            err_console.print(
+                f"[red]No bot named {bot!r}[/red] ({env_file} not found). "
+                f"Create it with `drive-agent bot add {bot} --folder <url>`."
+            )
+            raise typer.Exit(1)
+    ctx.obj = {"config": config, "env_file": env_file}
 
 
 def _settings(ctx: typer.Context) -> Settings:
     try:
-        return load_settings(ctx.obj["config"])
+        return load_settings(ctx.obj["config"], extra_env_file=ctx.obj.get("env_file"))
     except ConfigError as exc:
         err_console.print(f"[red]Config error:[/red] {exc}")
         raise typer.Exit(1) from exc
@@ -353,7 +378,11 @@ def ask(
     ] = None,
 ) -> None:
     """Ask questions about the indexed Drive files; answers cite their sources."""
-    from drive_agent.core.agent import DriveAgent, open_checkpointer  # deferred: slow imports
+    from drive_agent.core.agent import (  # deferred: slow imports
+        DriveAgent,
+        make_retriever,
+        open_checkpointer,
+    )
     from drive_agent.embeddings import build_embeddings
     from drive_agent.llm import LLMError
     from drive_agent.llm.claude import ClaudeLLM
@@ -373,10 +402,7 @@ def ask(
             err_console.print("[yellow]The index is empty.[/yellow] Run `drive-agent sync` first.")
             raise typer.Exit(1)
         llm = ClaudeLLM(settings)
-        store = vector_index.store
-
-        def retriever(query: str, k: int) -> list[Any]:
-            return store.similarity_search(query, k=k)
+        retriever = make_retriever(vector_index.store)
 
         with open_checkpointer(settings) as checkpointer:
             agent = DriveAgent(settings, llm, retriever, checkpointer)
@@ -476,6 +502,8 @@ def ui(
     env = dict(os.environ)
     if ctx.obj["config"] is not None:
         env[CONFIG_ENV_VAR] = str(Path(ctx.obj["config"]).resolve())
+    if settings.extra_env_file is not None:
+        env[EXTRA_ENV_VAR] = str(settings.extra_env_file.resolve())
     command = [
         sys.executable, "-m", "streamlit", "run", str(app_path),
         "--server.port", str(port),
@@ -489,9 +517,51 @@ def ui(
 
 @app.command()
 def slack(ctx: typer.Context) -> None:
-    """Run the Slack bot."""
-    _settings(ctx)
-    _not_implemented("slack", "M6")
+    """Run the Slack bot (Socket Mode by default: no public URL needed)."""
+    settings = _settings(ctx)
+    if importlib.util.find_spec("slack_bolt") is None:
+        err_console.print(
+            "[red]Slack support is not installed.[/red] pip install 'drive-knowledge-agent[slack]'"
+        )
+        raise typer.Exit(1)
+
+    from drive_agent.core.agent import DriveAgent, create_checkpointer, make_retriever
+    from drive_agent.embeddings import build_embeddings
+    from drive_agent.interfaces.slack_bot import runner
+    from drive_agent.llm import LLMError
+    from drive_agent.llm.claude import ClaudeLLM
+    from drive_agent.vectorstores import VectorStoreError, build_vector_index
+
+    warnings.filterwarnings("ignore", message="Failed to obtain server version")
+    try:
+        runner.required_tokens(settings)
+        with console.status("Loading the index…"):
+            vector_index = build_vector_index(settings, build_embeddings(settings))
+    except (ConfigError, VectorStoreError) as exc:
+        err_console.print(f"[red]Setup error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+    try:
+        if vector_index.count() == 0:
+            console.print("[yellow]⚠ The index is empty; run `drive-agent sync` first.[/yellow]")
+        agent = DriveAgent(
+            settings,
+            ClaudeLLM(settings),
+            make_retriever(vector_index.store),
+            create_checkpointer(settings),
+        )
+        mode = settings.interfaces.slack.mode
+        console.print(
+            f"Slack bot running in {mode} mode · {vector_index.description}. Ctrl+C to stop."
+        )
+        runner.run(settings, agent, vector_index)
+    except (ConfigError, LLMError) as exc:
+        err_console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+    except KeyboardInterrupt:
+        console.print("Stopped.")
+    finally:
+        vector_index.close()
 
 
 @app.command()
@@ -502,6 +572,8 @@ def status(ctx: typer.Context) -> None:
     table = Table(title="drive-agent status", show_header=False)
     table.add_column("key", style="bold")
     table.add_column("value")
+    if settings.extra_env_file is not None:
+        table.add_row("bot env file", str(settings.extra_env_file))
     table.add_row("config file", str(settings.source_file or "(defaults only)"))
     table.add_row("auth mode", settings.drive.auth_mode)
     table.add_row("folders", ", ".join(settings.drive.folder_ids) or "[red]none configured[/red]")
@@ -538,3 +610,113 @@ def _index_summary(settings: Settings) -> str:
         f"{last['chunks']} chunks from {last['files']} files · last sync {last['at']}{failed}"
         f" · {embedding}"
     )
+
+
+# --- bots: one bot per Drive folder ------------------------------------------
+
+bot_app = typer.Typer(
+    help="Manage bots. Each bot = one Drive knowledge base with its own Slack app.",
+    no_args_is_help=True,
+)
+app.add_typer(bot_app, name="bot")
+
+BOT_ENV_TEMPLATE = """\
+# Bot "{name}": one Drive knowledge base with its own index and Slack app.
+# Layered over the shared .env (Google, Qdrant, LLM settings come from there).
+# Holds Slack tokens: never commit this file.
+DRIVE_FOLDER_IDS={folders}
+DRIVE_AGENT__VECTOR_STORE__COLLECTION={collection}
+DRIVE_AGENT__DATA_DIR=.drive-agent/bots/{name}
+SLACK_COMMAND={command}
+
+# From the Slack app created with {manifest}:
+SLACK_BOT_TOKEN=
+SLACK_APP_TOKEN=
+
+# Optional:
+# SLACK_ALLOWED_CHANNELS=C0123ABC,C0456DEF
+# SLACK_ADMIN_USERS=U0123ABC
+"""
+
+
+@bot_app.command("add")
+def bot_add(
+    name: Annotated[str, typer.Argument(help="Short name, e.g. hr or engineering.")],
+    folder: Annotated[
+        list[str], typer.Option("--folder", "-f", help="Drive folder URL or ID (repeatable).")
+    ],
+    force: Annotated[bool, typer.Option(help="Overwrite an existing bot.")] = False,
+) -> None:
+    """Create bots/<name>.env and a Slack app manifest for one Drive folder."""
+    from drive_agent.interfaces.slack_bot.manifest import render_manifest
+
+    try:
+        env_path = bot_env_file(name)
+        folder_ids = [extract_folder_id(f) for f in folder]
+    except (ConfigError, ValueError) as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    if env_path.exists() and not force:
+        err_console.print(f"[red]{env_path} already exists.[/red] Use --force to overwrite.")
+        raise typer.Exit(1)
+
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    command = f"/drive-{name}"[:32]
+    manifest_path = env_path.with_name(f"{name}.manifest.yaml")
+    content = BOT_ENV_TEMPLATE.format(
+        name=name,
+        folders=",".join(folder_ids),
+        collection="drive_agent_" + name.replace("-", "_"),
+        command=command,
+        manifest=manifest_path,
+    )
+    fd = os.open(env_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    manifest_path.write_text(
+        render_manifest(
+            app_name=f"Drive Agent ({name})", display_name=f"drive-{name}", command=command
+        ),
+        encoding="utf-8",
+    )
+    console.print(f"[green]Created bot {name!r}[/green]: {env_path} and {manifest_path}")
+    console.print(
+        "Next:\n"
+        f"  1. Create a Slack app from {manifest_path} (api.slack.com/apps → From a manifest),\n"
+        f"     then put its SLACK_BOT_TOKEN and SLACK_APP_TOKEN in {env_path}\n"
+        f"  2. drive-agent --bot {name} check\n"
+        f"  3. drive-agent --bot {name} sync\n"
+        f"  4. drive-agent --bot {name} slack"
+    )
+
+
+@bot_app.command("list")
+def bot_list() -> None:
+    """Show every bot with its folders, index and Slack setup."""
+    from drive_agent.core.config import BOTS_DIR
+
+    files = sorted(BOTS_DIR.glob("*.env"))
+    if not files:
+        console.print("No bots yet. Create one with `drive-agent bot add <name> --folder <url>`.")
+        return
+    table = Table("bot", "folders", "index", "slack", "command")
+    for path in files:
+        try:
+            settings = load_settings(extra_env_file=path)
+        except ConfigError as exc:
+            table.add_row(path.stem, f"[red]config error: {exc}[/red]", "", "", "")
+            continue
+        secrets = settings.secrets
+        tokens = (
+            "[green]ready[/green]"
+            if secrets.slack_bot_token and secrets.slack_app_token
+            else "[yellow]tokens missing[/yellow]"
+        )
+        table.add_row(
+            path.stem,
+            ", ".join(settings.drive.folder_ids) or "[red]none[/red]",
+            _index_summary(settings).split(" · ")[0],
+            tokens,
+            settings.interfaces.slack.command,
+        )
+    console.print(table)

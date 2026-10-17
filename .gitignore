@@ -32,3 +32,6 @@ drive-agent.yaml
 
 # Local editor/agent tooling
 .claude/
+
+# Per-bot env files hold Slack tokens
+bots/*.env

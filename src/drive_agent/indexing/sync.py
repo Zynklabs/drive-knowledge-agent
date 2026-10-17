@@ -22,7 +22,7 @@ from langchain_core.indexing import index
 
 from drive_agent.core.config import Settings
 from drive_agent.indexing.loader import FileResult, FolderLoad, load_folder
-from drive_agent.indexing.state import SQLiteRecordManager
+from drive_agent.indexing.state import STATE_DB, SQLiteRecordManager
 from drive_agent.vectorstores.base import VectorIndex
 
 
@@ -139,3 +139,37 @@ def run_sync(
         },
     )
     return report
+
+
+def sync_now(
+    settings: Settings,
+    vector_index: VectorIndex,
+    *,
+    full: bool = False,
+    on_file: Callable[[FileResult], None] | None = None,
+) -> SyncReport:
+    """Connect to Drive (non-interactively) and run one sync. Used by the web app and Slack.
+
+    Raises ``DriveAuthError`` or ``SyncError``.
+    """
+    from drive_agent.drive.auth import connect  # deferred: Google client import is slow
+
+    _auth, service = connect(settings.drive, settings.data_dir, interactive=False)
+    records = SQLiteRecordManager(vector_index.namespace, settings.data_dir / STATE_DB)
+    try:
+        return run_sync(service, settings, vector_index, records, full=full, on_file=on_file)
+    finally:
+        records.close()
+
+
+def summarize(report: SyncReport) -> str:
+    text = (
+        f"+{report.added} added · {report.updated} updated · {report.unchanged} unchanged · "
+        f"{report.deleted} deleted"
+    )
+    if report.pruned_files:
+        text += f" ({report.pruned_files} files removed)"
+    failed = sum(1 for r in report.files if r.error)
+    if failed:
+        text += f" · {failed} file(s) failed"
+    return text + f" · {report.seconds}s"

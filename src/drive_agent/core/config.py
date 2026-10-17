@@ -36,6 +36,10 @@ from pydantic import (
 
 DEFAULT_CONFIG_FILE = Path("drive-agent.yaml")
 CONFIG_ENV_VAR = "DRIVE_AGENT_CONFIG"
+EXTRA_ENV_VAR = "DRIVE_AGENT_ENV_FILE"
+"""Path of an extra env file layered over ``.env`` (set by ``--env-file`` / ``--bot``)."""
+BOTS_DIR = Path("bots")
+_BOT_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,29}")
 NESTED_ENV_PREFIX = "DRIVE_AGENT__"
 
 AuthMode = Literal["service_account", "oauth"]
@@ -72,6 +76,9 @@ ENV_ALIASES: dict[str, str] = {
     "AGENT_MODE": "agent.mode",
     "TRACING_PROVIDER": "tracing.provider",
     "SLACK_MODE": "interfaces.slack.mode",
+    "SLACK_ALLOWED_CHANNELS": "interfaces.slack.allowed_channels",
+    "SLACK_ADMIN_USERS": "interfaces.slack.admin_users",
+    "SLACK_COMMAND": "interfaces.slack.command",
 }
 
 DEFAULT_FILE_KINDS: tuple[FileKind, ...] = ("docs", "slides", "pdf", "docx", "pptx", "txt", "md")
@@ -218,9 +225,17 @@ class TracingSettings(_Section):
 
 class SlackSettings(_Section):
     mode: Literal["socket", "http"] = "socket"
+    """socket: no public URL needed (SLACK_APP_TOKEN). http: Events API on ``http_port``."""
+    http_port: int = Field(default=3000, gt=0, lt=65536)
     allowed_channels: list[str] = Field(default_factory=list)
+    """Channel IDs the bot answers in; empty = every channel it is invited to."""
+    allow_dms: bool = True
+    admin_users: list[str] = Field(default_factory=list)
+    """Slack user IDs allowed to run `/drive-agent sync`; empty = nobody."""
+    command: str = Field(default="/drive-agent", pattern=r"^/[a-z0-9_-]{1,31}$")
+    """Slash command; give each bot in a workspace its own (e.g. /drive-hr)."""
 
-    _split_channels = field_validator("allowed_channels", mode="before")(_split_csv)
+    _split_lists = field_validator("allowed_channels", "admin_users", mode="before")(_split_csv)
 
 
 class InterfacesSettings(_Section):
@@ -280,6 +295,8 @@ class Settings(_Section):
     interfaces: InterfacesSettings = Field(default_factory=InterfacesSettings)
     secrets: Secrets = Field(default_factory=Secrets, exclude=True)
     source_file: Path | None = Field(default=None, exclude=True)
+    extra_env_file: Path | None = Field(default=None, exclude=True)
+    """The per-bot env file in use, if any."""
 
     def to_yaml_dict(self) -> dict[str, Any]:
         """Non-secret settings as plain data, suitable for writing a YAML config.
@@ -315,17 +332,38 @@ def _deep_merge(base: dict[str, Any], extra: Mapping[str, Any]) -> dict[str, Any
     return merged
 
 
-def _read_env(env_file: Path | None) -> dict[str, str]:
+def bot_env_file(name: str) -> Path:
+    """``bots/<name>.env``: one bot = one Drive knowledge base with its own Slack app."""
+    if not _BOT_NAME.fullmatch(name):
+        raise ConfigError(
+            f"invalid bot name {name!r}: use 1-30 lowercase letters, digits or dashes"
+        )
+    return BOTS_DIR / f"{name}.env"
+
+
+def _resolve_extra_env(extra_env_file: Path | None) -> Path | None:
+    if extra_env_file is None and os.environ.get(EXTRA_ENV_VAR):
+        extra_env_file = Path(os.environ[EXTRA_ENV_VAR])
+    if extra_env_file is not None and not extra_env_file.is_file():
+        raise ConfigError(f"env file not found: {extra_env_file}")
+    return extra_env_file
+
+
+def _read_env(env_file: Path | None, extra_env_file: Path | None = None) -> dict[str, str]:
+    """``.env``, then the extra (per-bot) env file, then the real process environment."""
     env: dict[str, str] = {}
-    if env_file is not None and env_file.is_file():
-        env.update({k: v for k, v in dotenv_values(env_file).items() if v is not None})
+    for path in (env_file, _resolve_extra_env(extra_env_file)):
+        if path is not None and path.is_file():
+            env.update({k: v for k, v in dotenv_values(path).items() if v is not None})
     env.update(os.environ)
     return env
 
 
-def read_environment(env_file: Path | None = Path(".env")) -> dict[str, str]:
-    """The environment the loader sees: ``.env`` values overlaid by the process environment."""
-    return _read_env(env_file)
+def read_environment(
+    env_file: Path | None = Path(".env"), extra_env_file: Path | None = None
+) -> dict[str, str]:
+    """The environment the loader sees: ``.env``, the per-bot env file, then the process."""
+    return _read_env(env_file, extra_env_file)
 
 
 def _env_layer(env: Mapping[str, str]) -> dict[str, Any]:
@@ -379,12 +417,14 @@ def load_settings(
     overrides: Mapping[str, Any] | None = None,
     env: Mapping[str, str] | None = None,
     env_file: Path | None = Path(".env"),
+    extra_env_file: Path | None = None,
 ) -> Settings:
     """Build ``Settings`` from all layers.
 
     ``env``, when given, replaces ``.env`` + ``os.environ`` entirely (used by tests and ``init``).
     """
-    environment = dict(env) if env is not None else _read_env(env_file)
+    extra = _resolve_extra_env(extra_env_file) if env is None else None
+    environment = dict(env) if env is not None else _read_env(env_file, extra)
     source = _resolve_config_file(config_file, environment)
 
     data: dict[str, Any] = _read_yaml(source) if source else {}
@@ -397,7 +437,9 @@ def load_settings(
         secrets = Secrets.from_env(environment)
     except ValidationError as exc:
         raise ConfigError(_format_validation_error(exc)) from exc
-    return settings.model_copy(update={"secrets": secrets, "source_file": source})
+    return settings.model_copy(
+        update={"secrets": secrets, "source_file": source, "extra_env_file": extra}
+    )
 
 
 def _format_validation_error(exc: ValidationError) -> str:

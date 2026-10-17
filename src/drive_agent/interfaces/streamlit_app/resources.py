@@ -13,7 +13,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 
 from drive_agent import embeddings as embeddings_factory
 from drive_agent import vectorstores
-from drive_agent.core.agent import DriveAgent, create_checkpointer
+from drive_agent.core.agent import DriveAgent, create_checkpointer, make_retriever
 from drive_agent.core.config import ConfigError, Settings, load_settings
 from drive_agent.llm import claude
 from drive_agent.vectorstores import VectorIndex, VectorStoreError
@@ -27,13 +27,8 @@ class Resources:
     checkpointer: BaseCheckpointSaver[Any]
 
     def agent(self) -> DriveAgent:
-        store = self.index.store
-
-        def retriever(query: str, k: int) -> list[Any]:
-            return store.similarity_search(query, k=k)
-
         llm = claude.ClaudeLLM(self.settings)
-        return DriveAgent(self.settings, llm, retriever, self.checkpointer)
+        return DriveAgent(self.settings, llm, make_retriever(self.index.store), self.checkpointer)
 
     def close(self) -> None:
         self.index.close()

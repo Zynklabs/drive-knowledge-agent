@@ -8,11 +8,10 @@ from typing import Any
 
 import streamlit as st
 
-from drive_agent.drive import auth
 from drive_agent.drive.auth import DriveAuthError
 from drive_agent.indexing.loader import FileResult
 from drive_agent.indexing.state import STATE_DB, SQLiteRecordManager
-from drive_agent.indexing.sync import SyncError, SyncReport, embedding_fingerprint, run_sync
+from drive_agent.indexing.sync import SyncError, SyncReport, embedding_fingerprint, sync_now
 from drive_agent.interfaces.streamlit_app.resources import Resources, get_resources
 
 
@@ -50,32 +49,26 @@ def _sync(resources: Resources, *, full: bool) -> SyncReport | None:
     if not settings.drive.folder_ids:
         st.error("No Drive folders configured. Add them on the Setup page.")
         return None
-    try:
-        _drive_auth, service = auth.connect(settings.drive, settings.data_dir, interactive=False)
-    except DriveAuthError as exc:
-        st.error(f"**Drive access:** {exc}")
-        return None
-
-    records = _records(resources)
     label = "Rebuilding the index…" if full else "Syncing…"
-    try:
-        with st.status(label, expanded=True) as status:
+    with st.status(label, expanded=True) as status:
 
-            def on_file(result: FileResult) -> None:
-                if result.error:
-                    status.write(f"✗ {result.file.path}: {result.error}")
-                else:
-                    status.write(f"✓ {result.file.path} · {len(result.chunks)} chunks")
+        def on_file(result: FileResult) -> None:
+            if result.error:
+                status.write(f"✗ {result.file.path}: {result.error}")
+            else:
+                status.write(f"✓ {result.file.path} · {len(result.chunks)} chunks")
 
-            report = run_sync(
-                service, settings, resources.index, records, full=full, on_file=on_file
-            )
-            status.update(label=f"Done in {report.seconds}s", state="complete", expanded=False)
-    except SyncError as exc:
-        st.error(str(exc))
-        return None
-    finally:
-        records.close()
+        try:
+            report = sync_now(settings, resources.index, full=full, on_file=on_file)
+        except DriveAuthError as exc:
+            status.update(label="Drive access failed", state="error")
+            st.error(f"**Drive access:** {exc}")
+            return None
+        except SyncError as exc:
+            status.update(label="Sync stopped", state="error")
+            st.error(str(exc))
+            return None
+        status.update(label=f"Done in {report.seconds}s", state="complete", expanded=False)
     return report
 
 
