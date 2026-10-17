@@ -5,7 +5,7 @@ Thanks for helping build Drive Knowledge Agent.
 ## Setup
 
 ```bash
-uv sync
+uv sync --all-extras
 uv run pre-commit install
 ```
 

@@ -5,8 +5,10 @@
 # drive.folder_ids:       folder URLs or IDs (sub-folders are indexed recursively)
 # drive.include_mime:     docs, slides, pdf, docx, pptx, txt, md, html, json
 #                         (Excel, Google Sheets and CSV are out of scope)
-# embeddings.provider:    voyage | openai | cohere | google | local  (model defaults per provider)
-# vector_store.provider:  chroma | qdrant | pinecone | pgvector
+# embeddings.provider:    local (open-source via FastEmbed) | voyage | openai
+# embeddings.model:       null = provider default (local: nomic-ai/nomic-embed-text-v1.5)
+# vector_store.provider:  qdrant  (chroma | pinecone | pgvector planned)
+# vector_store.url:       Qdrant server / Qdrant Cloud URL; null = embedded on disk
 # agent.mode:             rag | agentic | auto
 # agent.checkpointer:     memory | sqlite | postgres
 # tracing.provider:       none | langsmith | langfuse
@@ -33,16 +35,16 @@ drive:
 ingest:
   chunk_tokens: 800
   chunk_overlap: 120
-  contextual_chunks: true
+  contextual_chunks: false
   schedule_cron: 0 */6 * * *
 embeddings:
-  provider: voyage
-  model: null                 # null = provider default
+  provider: local
+  model: null
 vector_store:
-  provider: chroma
+  provider: qdrant
   collection: drive_agent
   url: null
-  persist_dir: .drive-agent/chroma
+  persist_dir: null
 retrieval:
   top_k: 30
   rerank: true

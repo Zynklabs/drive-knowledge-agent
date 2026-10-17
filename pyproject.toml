@@ -38,9 +38,11 @@ classifiers = [
 # are added as dependencies / optional extras in the milestone that uses them.
 dependencies = [
   "beautifulsoup4>=4.12",
+  "fastembed>=0.9",
   "google-api-python-client>=2.150",
   "google-auth>=2.35",
   "google-auth-oauthlib>=1.2",
+  "langchain-qdrant>=1.1",
   "langchain-text-splitters>=0.3",
   "pydantic>=2.7",
   "pypdf>=5.1",
@@ -54,6 +56,14 @@ dependencies = [
 
 [project.scripts]
 drive-agent = "drive_agent.interfaces.cli:app"
+
+[project.optional-dependencies]
+voyage = [
+    "langchain-voyageai>=0.1",
+]
+openai = [
+    "langchain-openai>=0.3",
+]
 
 [dependency-groups]
 dev = [
@@ -106,3 +116,5 @@ init_typed = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+# qdrant-client warns from a background thread when a server is unreachable (tested on purpose).
+filterwarnings = ["ignore:Failed to obtain server version:UserWarning"]

@@ -48,7 +48,7 @@ DEFAULT_EMBEDDING_MODELS: dict[str, str] = {
     "openai": "text-embedding-3-small",
     "cohere": "embed-v4.0",
     "google": "gemini-embedding-001",
-    "local": "BAAI/bge-m3",
+    "local": "nomic-ai/nomic-embed-text-v1.5",  # Apache-2.0, 8192-token context, via FastEmbed
 }
 
 # Spec-friendly environment variables -> dotted config path.
@@ -145,7 +145,7 @@ class DriveSettings(_Section):
 class IngestSettings(_Section):
     chunk_tokens: int = Field(default=800, gt=0)
     chunk_overlap: int = Field(default=120, ge=0)
-    contextual_chunks: bool = True
+    contextual_chunks: bool = False  # Claude-written chunk context; not implemented yet
     schedule_cron: str | None = "0 */6 * * *"
 
     @model_validator(mode="after")
@@ -156,7 +156,7 @@ class IngestSettings(_Section):
 
 
 class EmbeddingsSettings(_Section):
-    provider: EmbeddingsProvider = "voyage"
+    provider: EmbeddingsProvider = "local"
     model: str | None = None
 
     @model_validator(mode="after")
@@ -167,10 +167,13 @@ class EmbeddingsSettings(_Section):
 
 
 class VectorStoreSettings(_Section):
-    provider: VectorStoreProvider = "chroma"
+    provider: VectorStoreProvider = "qdrant"
     collection: str = "drive_agent"
     url: str | None = None
-    persist_dir: Path = Path(".drive-agent/chroma")
+    """Server URL, e.g. http://localhost:6333 or a Qdrant Cloud URL. ``:memory:`` for tests.
+    When unset, Qdrant runs embedded on disk at ``persist_dir``."""
+    persist_dir: Path | None = None
+    """Embedded-mode storage; defaults to ``<data_dir>/qdrant``."""
 
 
 class RetrievalSettings(_Section):

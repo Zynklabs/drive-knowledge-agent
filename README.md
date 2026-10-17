@@ -3,10 +3,11 @@
 An open-source agent that indexes a Google Drive folder (including every sub-folder and Shared Drive) and answers questions about its contents with citations. You can use it from a **Streamlit** web app or a **Slack** bot.
 
 - **Read-only Drive access.** You connect it with a service account (for enterprises) or your own Google sign-in (OAuth).
-- **Built on LangGraph + LangChain.** You can swap the vector store (Chroma, Qdrant, Pinecone, pgvector), the embedding provider, or the LLM through config.
+- **Built on LangGraph + LangChain.** You can swap the vector store (Qdrant today; Chroma, Pinecone and pgvector planned), the embedding provider, or the LLM through config.
+- **Open-source embeddings by default.** `nomic-embed-text-v1.5` (Apache-2.0) runs locally via FastEmbed, so document text never leaves your machine during indexing.
 - **Claude** is the default answer model.
 
-> **Status: pre-alpha (M2).** `init`, `status`, `check`, and `sync --dry-run` (fetch → parse → chunk, nothing written) work so far. See the [roadmap](#roadmap).
+> **Status: pre-alpha (M3).** `init`, `status`, `check`, and `sync` (index into Qdrant with open-source embeddings) work. Question answering lands in M4. See the [roadmap](#roadmap).
 
 ## Supported files
 
@@ -35,6 +36,27 @@ Access is always **read-only** (`drive.readonly`). Use a service account (share 
 
 Step-by-step setup: **[docs/google-drive-access.md](docs/google-drive-access.md)**.
 
+## Vector database: bring your own Qdrant
+
+The agent stores embeddings in [Qdrant](https://qdrant.tech). Point it at your instance:
+
+```bash
+QDRANT_URL=https://<cluster>.cloud.qdrant.io   # or http://localhost:6333
+QDRANT_API_KEY=...                             # if your instance requires one
+```
+
+To try it locally, run `docker run -p 6333:6333 qdrant/qdrant:v1.19.2`, or use a free Qdrant Cloud cluster. If `QDRANT_URL` is unset, Qdrant runs **embedded on disk** in `.drive-agent/qdrant`, with no server needed (single process; good for a quick trial).
+
+## Embeddings
+
+| `EMBEDDINGS_PROVIDER` | Model (default) | Notes |
+|---|---|---|
+| `local` (default) | `nomic-ai/nomic-embed-text-v1.5` | Apache-2.0, 8k context, runs on CPU via FastEmbed; about 0.5 GB downloaded once into `.drive-agent/models` |
+| `voyage` | `voyage-3.5` | `pip install 'drive-knowledge-agent[voyage]'` + `VOYAGE_API_KEY` |
+| `openai` | `text-embedding-3-small` | `pip install 'drive-knowledge-agent[openai]'` + `OPENAI_API_KEY` |
+
+Other good open-source choices are `ibm-granite/granite-embedding-small-english-r2` (tiny and fast) and `Qwen/Qwen3-Embedding-0.6B` (multilingual, heavier). Set them with `EMBEDDINGS_MODEL`. Changing the model requires `drive-agent sync --full`, and the agent refuses to mix embeddings from different models.
+
 ## Configuration
 
 Settings are layered, lowest to highest priority:
@@ -53,7 +75,7 @@ Secrets (API keys, tokens, database URLs) are read **only** from the environment
 | `drive-agent status` | Resolved config, secrets set, index stats | M0 ✅ |
 | `drive-agent check [--show-skipped]` | Permission doctor for Drive access | M1 ✅ |
 | `drive-agent sync --dry-run [--show-chunks N]` | Fetch, parse and chunk; report per file, write nothing | M2 ✅ |
-| `drive-agent sync [--full]` | Index / re-index | M3 |
+| `drive-agent sync [--full]` | Index into Qdrant; re-runs only embed new or changed chunks and remove stale ones | M3 ✅ |
 | `drive-agent ask "…"` | One-off question | M4 |
 | `drive-agent ui` | Streamlit app | M5 |
 | `drive-agent slack` | Slack bot | M6 |
@@ -77,7 +99,7 @@ Secrets (API keys, tokens, database URLs) are read **only** from the environment
 ## Development
 
 ```bash
-uv sync
+uv sync --all-extras
 uv run pre-commit install
 uv run ruff check && uv run ruff format --check
 uv run mypy

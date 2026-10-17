@@ -54,9 +54,11 @@ def test_defaults_match_spec() -> None:
     assert s.drive.folder_ids == []
     assert s.ingest.chunk_tokens == 800
     assert s.ingest.chunk_overlap == 120
-    assert s.embeddings.provider == "voyage"
-    assert s.embeddings.model == "voyage-3.5"
-    assert s.vector_store.provider == "chroma"
+    assert s.ingest.contextual_chunks is False
+    assert s.embeddings.provider == "local"
+    assert s.embeddings.model == "nomic-ai/nomic-embed-text-v1.5"
+    assert s.vector_store.provider == "qdrant"
+    assert s.vector_store.url is None
     assert s.retrieval.top_k == 30
     assert s.retrieval.final_k == 8
     assert s.llm.answer_model == "claude-sonnet-5-5"
@@ -255,5 +257,5 @@ def test_env_example_loads() -> None:
     s = load_settings(env={}, env_file=None)  # baseline
     from_example = load_settings(env_file=REPO_ROOT / ".env.example")
     assert from_example.drive.auth_mode == s.drive.auth_mode
-    assert from_example.vector_store.provider == "chroma"
+    assert from_example.vector_store.provider == "qdrant"
     assert not any(from_example.secrets.status().values())

@@ -89,7 +89,7 @@ def test_status_shows_config_and_secret_presence(monkeypatch: pytest.MonkeyPatch
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0, result.output
     assert FOLDER in result.output
-    assert "chroma" in result.output
+    assert "qdrant" in result.output
     assert "ANTHROPIC_API_KEY" in result.output
     assert "sk-ant-secret" not in result.output
 
@@ -112,8 +112,6 @@ def test_bad_config_exits_with_message(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize(
     ("args", "milestone"),
     [
-        (["sync"], "M3"),
-        (["sync", "--full"], "M3"),
         (["ask", "What is our leave policy?"], "M4"),
         (["ui"], "M5"),
         (["slack"], "M6"),
@@ -240,3 +238,54 @@ def test_sync_dry_run_without_folders() -> None:
     result = runner.invoke(app, ["sync", "--dry-run"])
     assert result.exit_code == 1
     assert "No Drive folders configured" in result.output
+
+
+# --- sync (real) ------------------------------------------------------------
+
+
+def test_sync_then_resync_then_status(monkeypatch: pytest.MonkeyPatch, sa_key_file: Path) -> None:
+    from langchain_core.embeddings import DeterministicFakeEmbedding
+
+    import drive_agent.embeddings
+    from drive_agent.drive.fetcher import DriveFetcher
+
+    from .doc_factory import make_pdf
+    from .fake_drive import fake_download
+
+    monkeypatch.setattr(DriveFetcher, "_download", fake_download)
+    monkeypatch.setattr(
+        drive_agent.embeddings, "build_embeddings", lambda s: DeterministicFakeEmbedding(size=8)
+    )
+    drive = FakeDrive(
+        [folder("root", "Hiring"), file("cv", "Jane.pdf", "application/pdf", "root", size=10)],
+        contents={"cv": make_pdf(["Jane Doe, engineer", "Python"])},
+    )
+    _use_fake_drive(monkeypatch, sa_key_file, drive)
+    monkeypatch.setenv("DRIVE_FOLDER_IDS", "root")  # embedded Qdrant under ./.drive-agent
+
+    first = runner.invoke(app, ["sync"])
+    assert first.exit_code == 0, first.output
+    assert "Syncing into qdrant .drive-agent/qdrant / drive_agent" in first.output
+    assert "+2 added · 0 updated · 0 unchanged · 0 deleted" in first.output
+
+    second = runner.invoke(app, ["sync"])
+    assert second.exit_code == 0, second.output
+    assert "+0 added · 0 updated · 2 unchanged · 0 deleted" in second.output
+
+    status = runner.invoke(app, ["status"])
+    assert "2 chunks from 1 files · last sync" in status.output
+
+
+def test_sync_setup_errors(monkeypatch: pytest.MonkeyPatch, sa_key_file: Path) -> None:
+    _use_fake_drive(monkeypatch, sa_key_file, FakeDrive([folder("root", "R")]))
+    monkeypatch.setenv("DRIVE_FOLDER_IDS", "root")
+    monkeypatch.setenv("EMBEDDINGS_PROVIDER", "voyage")  # no VOYAGE_API_KEY set
+    result = runner.invoke(app, ["sync"])
+    assert result.exit_code == 1
+    assert "Setup error" in result.output
+    assert "VOYAGE_API_KEY" in result.output
+
+
+def test_status_before_any_sync() -> None:
+    result = runner.invoke(app, ["status"])
+    assert "not built yet" in result.output

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -20,9 +21,11 @@ from drive_agent.core.config import (
     load_settings,
 )
 from drive_agent.drive.models import SKIP_LABELS
+from drive_agent.vectorstores.location import describe_location, namespace_for
 
 if TYPE_CHECKING:
     from drive_agent.drive.doctor import CheckResult
+    from drive_agent.indexing.loader import FolderLoad
 
 app = typer.Typer(
     name="drive-agent",
@@ -183,10 +186,54 @@ def _render_check(result: CheckResult, *, show_skipped: bool) -> None:
             console.print(table)
 
 
+def _render_load(load: FolderLoad, show_chunks: int) -> None:
+    console.print()
+    if load.root is None or load.error:
+        console.print(f"[red]✗ Folder {load.folder_id}[/red]  {load.error}")
+        if load.root is None:
+            return
+    console.print(f"[bold]{load.root.name}[/bold] ({load.root.id})")
+    table = Table("", "file", "chunks", "~tokens", "notes", box=None, pad_edge=False)
+    for result in load.files:
+        mark = (
+            "[red]✗[/red]"
+            if result.error
+            else "[yellow]⚠[/yellow]"
+            if result.warnings
+            else "[green]✓[/green]"
+        )
+        notes = result.error or "; ".join(result.warnings)
+        table.add_row(mark, result.file.path, str(len(result.chunks)), f"{result.tokens:,}", notes)
+    console.print(table)
+    if load.skipped:
+        console.print(f"  skipped (see `drive-agent check --show-skipped`): {len(load.skipped)}")
+    for result in load.files:
+        for chunk in result.chunks[:show_chunks]:
+            meta = chunk.metadata
+            console.rule(f"{meta['chunk_id']}  {meta['path']}", style="dim")
+            console.print(chunk.page_content, markup=False, highlight=False)
+
+
+def _print_totals(loads: list[FolderLoad]) -> None:
+    files = [r for load in loads for r in load.files]
+    console.print()
+    console.print(
+        f"Total: {len(files)} files · {sum(len(r.chunks) for r in files)} chunks · "
+        f"~{sum(r.tokens for r in files):,} tokens · {sum(1 for r in files if r.error)} failed · "
+        f"{sum(len(load.skipped) for load in loads)} skipped"
+    )
+
+
+def _folder_failed(loads: list[FolderLoad]) -> bool:
+    return any(load.root is None or load.error for load in loads)
+
+
 @app.command()
 def sync(
     ctx: typer.Context,
-    full: Annotated[bool, typer.Option(help="Re-index everything.")] = False,
+    full: Annotated[
+        bool, typer.Option("--full", help="Drop the index and rebuild it from scratch.")
+    ] = False,
     dry_run: Annotated[
         bool,
         typer.Option(
@@ -195,22 +242,19 @@ def sync(
     ] = False,
     show_chunks: Annotated[
         int,
-        typer.Option(
-            "--show-chunks", min=0, help="With --dry-run: print the first N chunks per file."
-        ),
+        typer.Option("--show-chunks", min=0, help="Print the first N chunks of each file."),
     ] = 0,
 ) -> None:
-    """Index or re-index the configured Drive folders."""
-    settings = _settings(ctx)
-    if not dry_run:
-        _not_implemented("sync", "M3")
-
+    """Index the configured Drive folders: embed new or changed chunks, remove stale ones."""
     from drive_agent.drive.auth import DriveAuthError, connect  # deferred: slow imports
     from drive_agent.indexing.loader import FileResult, load_folder
 
+    settings = _settings(ctx)
     # pypdf logs recoverable structure problems (e.g. "wrong pointing object") as warnings;
     # they don't affect extraction and would clutter the report.
     logging.getLogger("pypdf").setLevel(logging.ERROR)
+    # An unreachable Qdrant is reported by us; skip qdrant-client's duplicate thread warning.
+    warnings.filterwarnings("ignore", message="Failed to obtain server version")
 
     if not settings.drive.folder_ids:
         err_console.print("[red]No Drive folders configured.[/red] Run `drive-agent init`.")
@@ -221,61 +265,73 @@ def sync(
         err_console.print(f"[red]Auth error:[/red] {exc}")
         raise typer.Exit(1) from exc
 
-    console.print("[bold]Dry run[/bold]: fetching, parsing and chunking only. Nothing is written.")
-    totals = {"files": 0, "chunks": 0, "tokens": 0, "failed": 0, "skipped": 0}
-    folder_failed = False
-    for folder_id in settings.drive.folder_ids:
-        with console.status(f"Reading folder {folder_id}…") as status:
+    if dry_run:
+        console.print(
+            "[bold]Dry run[/bold]: fetching, parsing and chunking only. Nothing is written."
+        )
+        loads: list[FolderLoad] = []
+        for folder_id in settings.drive.folder_ids:
+            with console.status(f"Reading folder {folder_id}…") as status:
 
-            def progress(result: FileResult) -> None:
-                status.update(f"Parsed {result.file.path}")
+                def progress(result: FileResult) -> None:
+                    status.update(f"Parsed {result.file.path}")
 
-            load = load_folder(service, settings, folder_id, on_file=progress)
+                loads.append(load_folder(service, settings, folder_id, on_file=progress))
+            _render_load(loads[-1], show_chunks)
+        _print_totals(loads)
+        raise typer.Exit(1 if _folder_failed(loads) else 0)
 
-        console.print()
-        if load.root is None or load.error:
-            folder_failed = True
-            console.print(f"[red]✗ Folder {folder_id}[/red]  {load.error}")
-            if load.root is None:
-                continue
-        console.print(f"[bold]{load.root.name}[/bold] ({load.root.id})")
-        table = Table("", "file", "chunks", "~tokens", "notes", box=None, pad_edge=False)
-        for result in load.files:
-            mark = (
-                "[red]✗[/red]"
-                if result.error
-                else "[yellow]⚠[/yellow]"
-                if result.warnings
-                else "[green]✓[/green]"
-            )
-            notes = result.error or "; ".join(result.warnings)
-            table.add_row(
-                mark, result.file.path, str(len(result.chunks)), f"{result.tokens:,}", notes
-            )
-        console.print(table)
-        if load.skipped:
-            console.print(
-                f"  skipped (see `drive-agent check --show-skipped`): {len(load.skipped)}"
-            )
+    from drive_agent.embeddings import build_embeddings
+    from drive_agent.indexing.state import STATE_DB, SQLiteRecordManager
+    from drive_agent.indexing.sync import SyncError, embedding_fingerprint, run_sync
+    from drive_agent.vectorstores import VectorStoreError, build_vector_index
 
-        for result in load.files:
-            for chunk in result.chunks[:show_chunks]:
-                meta = chunk.metadata
-                console.rule(f"{meta['chunk_id']}  {meta['path']}", style="dim")
-                console.print(chunk.page_content, markup=False, highlight=False)
+    fingerprint = embedding_fingerprint(settings)
+    try:
+        with console.status(f"Loading embeddings {fingerprint} (first run downloads the model)…"):
+            embeddings = build_embeddings(settings)
+            vector_index = build_vector_index(settings, embeddings)
+    except (ConfigError, VectorStoreError) as exc:
+        err_console.print(f"[red]Setup error:[/red] {exc}")
+        raise typer.Exit(1) from exc
 
-        totals["files"] += len(load.files)
-        totals["chunks"] += sum(len(r.chunks) for r in load.files)
-        totals["tokens"] += sum(r.tokens for r in load.files)
-        totals["failed"] += sum(1 for r in load.files if r.error)
-        totals["skipped"] += len(load.skipped)
-
-    console.print()
     console.print(
-        f"Total: {totals['files']} files · {totals['chunks']} chunks · "
-        f"~{totals['tokens']:,} tokens · {totals['failed']} failed · {totals['skipped']} skipped"
+        f"Syncing into [bold]{vector_index.description}[/bold] · embeddings {fingerprint}"
     )
-    raise typer.Exit(1 if folder_failed else 0)
+    records = SQLiteRecordManager(vector_index.namespace, settings.data_dir / STATE_DB)
+    try:
+        with console.status("Reading Drive and embedding…") as status:
+            report = run_sync(
+                service,
+                settings,
+                vector_index,
+                records,
+                full=full,
+                on_file=lambda result: status.update(f"Processed {result.file.path}"),
+            )
+    except SyncError as exc:
+        err_console.print(f"[red]Sync stopped:[/red] {exc}")
+        raise typer.Exit(1) from exc
+    finally:
+        records.close()
+        vector_index.close()
+
+    for load in report.folders:
+        _render_load(load, show_chunks)
+    _print_totals(report.folders)
+    console.print(
+        f"Index: [green]+{report.added} added[/green] · {report.updated} updated · "
+        f"{report.unchanged} unchanged · {report.deleted} deleted"
+        + (f" ({report.pruned_files} files removed)" if report.pruned_files else "")
+        + f" · {report.seconds}s"
+    )
+    if report.healed:
+        console.print("[yellow]⚠ The vector store was empty, so the sync state was reset.[/yellow]")
+    if report.prune_skipped:
+        console.print(
+            "[yellow]⚠ A folder could not be read, so removed files were not pruned.[/yellow]"
+        )
+    raise typer.Exit(1 if _folder_failed(report.folders) else 0)
 
 
 @app.command()
@@ -312,15 +368,34 @@ def status(ctx: typer.Context) -> None:
     table.add_row("folders", ", ".join(settings.drive.folder_ids) or "[red]none configured[/red]")
     table.add_row("file types", ", ".join(settings.drive.include_mime))
     table.add_row("embeddings", f"{settings.embeddings.provider} / {settings.embeddings.model}")
-    table.add_row(
-        "vector store", f"{settings.vector_store.provider} / {settings.vector_store.collection}"
-    )
+    table.add_row("vector store", describe_location(settings))
     table.add_row("answer model", settings.llm.answer_model)
     table.add_row("agent mode", settings.agent.mode)
-    table.add_row("index", "not built yet")
+    table.add_row("index", _index_summary(settings))
     console.print(table)
 
     secrets = settings.secrets.status()
     console.print(
         "secrets set: " + (", ".join(name for name, is_set in secrets.items() if is_set) or "none")
+    )
+
+
+def _index_summary(settings: Settings) -> str:
+    from drive_agent.indexing.state import STATE_DB, SQLiteRecordManager
+
+    db = settings.data_dir / STATE_DB
+    if not db.is_file():
+        return "not built yet (run `drive-agent sync`)"
+    records = SQLiteRecordManager(namespace_for(settings), db)
+    try:
+        last = records.get_meta("last_sync")
+        embedding = records.get_meta("embedding")
+    finally:
+        records.close()
+    if not last:
+        return "not built yet (run `drive-agent sync`)"
+    failed = f", {last['failed']} failed" if last.get("failed") else ""
+    return (
+        f"{last['chunks']} chunks from {last['files']} files · last sync {last['at']}{failed}"
+        f" · {embedding}"
     )
