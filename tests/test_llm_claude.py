@@ -142,3 +142,57 @@ def test_api_key_from_settings_is_used() -> None:
     )
     client = ClaudeLLM(settings)._client
     assert client.api_key == "sk-test"
+
+
+# --- OpenRouter -------------------------------------------------------------
+
+from drive_agent.llm.claude import OPENROUTER_BASE_URL, model_id  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("claude-opus-5-5", "anthropic/claude-opus-5.5"),
+        ("claude-haiku-5-5", "anthropic/claude-haiku-5.5"),
+        ("claude-opus-4-8", "anthropic/claude-opus-4.8"),
+        ("claude-fable-5-1", "anthropic/claude-fable-5.1"),
+        ("claude-opus-5", "anthropic/claude-opus-5"),
+        ("anthropic/claude-sonnet-5.5", "anthropic/claude-sonnet-5.5"),  # already qualified
+    ],
+)
+def test_openrouter_model_ids(model: str, expected: str) -> None:
+    assert model_id(model, "openrouter") == expected
+    assert model_id(model, "anthropic") == model
+
+
+def test_openrouter_requests_use_mapped_models_and_no_fallback_beta() -> None:
+    final = SimpleNamespace(stop_reason="end_turn", model="m", content=[text_block("ok")])
+    client = StubClient(
+        final=final,
+        parse_result=SimpleNamespace(stop_reason="end_turn", parsed_output=Out(query="q")),
+    )
+    router = llm(client, provider="openrouter")
+    router.answer("s", [])
+    router.structured("s", "p", Out)
+    assert client.stream_kwargs["model"] == "anthropic/claude-opus-5.5"
+    assert "betas" not in client.stream_kwargs
+    assert "fallbacks" not in client.stream_kwargs
+    assert client.stream_kwargs["output_config"] == {"effort": "medium"}
+    assert client.parse_kwargs["model"] == "anthropic/claude-haiku-5.5"
+
+
+def test_openrouter_client_uses_bearer_token_and_base_url() -> None:
+    settings = Settings.model_validate({"llm": {"provider": "openrouter"}})
+    settings.secrets = settings.secrets.model_copy(
+        update={"openrouter_api_key": SecretStr("sk-or-test")}
+    )
+    client = ClaudeLLM(settings)._client
+    assert str(client.base_url).rstrip("/") == OPENROUTER_BASE_URL
+    assert client.auth_token == "sk-or-test"
+    assert client.api_key is None
+
+
+def test_openrouter_without_key() -> None:
+    settings = Settings.model_validate({"llm": {"provider": "openrouter"}})
+    with pytest.raises(LLMError, match="OPENROUTER_API_KEY"):
+        ClaudeLLM(settings)

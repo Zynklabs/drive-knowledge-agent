@@ -261,3 +261,10 @@ def test_env_example_loads() -> None:
     assert from_example.drive.auth_mode == s.drive.auth_mode
     assert from_example.vector_store.provider == "qdrant"
     assert not any(from_example.secrets.status().values())
+
+
+def test_llm_provider_and_openrouter_key_from_env() -> None:
+    s = load_settings(env={"LLM_PROVIDER": "openrouter", "OPENROUTER_API_KEY": "sk-or-x"})
+    assert s.llm.provider == "openrouter"
+    assert s.secrets.openrouter_api_key is not None
+    assert s.secrets.status()["OPENROUTER_API_KEY"] is True

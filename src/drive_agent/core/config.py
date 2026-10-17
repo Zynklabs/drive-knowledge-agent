@@ -66,6 +66,7 @@ ENV_ALIASES: dict[str, str] = {
     "VECTOR_STORE": "vector_store.provider",
     "VECTOR_STORE_URL": "vector_store.url",
     "QDRANT_URL": "vector_store.url",
+    "LLM_PROVIDER": "llm.provider",
     "ANSWER_MODEL": "llm.answer_model",
     "FAST_MODEL": "llm.fast_model",
     "AGENT_MODE": "agent.mode",
@@ -197,7 +198,8 @@ Effort = Literal["low", "medium", "high", "xhigh", "max"]
 
 
 class LLMSettings(_Section):
-    provider: Literal["anthropic"] = "anthropic"
+    provider: Literal["anthropic", "openrouter"] = "anthropic"
+    """``openrouter`` sends the same Anthropic-format requests to OpenRouter."""
     answer_model: str = "claude-opus-5-5"
     answer_effort: Effort = "medium"
     fast_model: str = "claude-haiku-5-5"
@@ -231,6 +233,7 @@ class Secrets(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     anthropic_api_key: SecretStr | None = None
+    openrouter_api_key: SecretStr | None = None
     voyage_api_key: SecretStr | None = None
     openai_api_key: SecretStr | None = None
     cohere_api_key: SecretStr | None = None

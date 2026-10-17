@@ -79,14 +79,14 @@ Conversations are remembered per `--thread` in `.drive-agent/conversations.db`.
 | `llm.answer_model` / `ANSWER_MODEL` | `claude-opus-5-5` | Effort `llm.answer_effort` (default `medium`); server-side refusal fallback enabled |
 | `llm.fast_model` / `FAST_MODEL` | `claude-haiku-5-5` | Query rewriting and relevance grading (effort `low`) |
 
-Claude credentials: set `ANTHROPIC_API_KEY` in `.env`, or sign in once with `ant auth login`.
+Claude credentials: set `ANTHROPIC_API_KEY` in `.env`, or sign in once with `ant auth login`. To use **OpenRouter**, set `LLM_PROVIDER=openrouter` and `OPENROUTER_API_KEY`. The same Anthropic-format requests go to OpenRouter, with model IDs mapped automatically (`claude-opus-5-5` → `anthropic/claude-opus-5.5`); only Anthropic's server-side refusal fallback isn't available there.
 
 ### What leaves your machine
 
 | Step | Data | Where it goes |
 |---|---|---|
 | `sync` | All indexed text | Your local embedding model, then your Qdrant (Qdrant stores the chunk text) |
-| `ask` | Your question, recent conversation turns, the ~20 retrieved chunks (for grading) and the kept chunks (for the answer) | The Claude API |
+| `ask` | Your question, recent conversation turns, the ~20 retrieved chunks (for grading) and the kept chunks (for the answer) | The Claude API (via OpenRouter if `LLM_PROVIDER=openrouter`) |
 | `ask` | Questions and answers | `.drive-agent/conversations.db` on this machine |
 
 ## Configuration

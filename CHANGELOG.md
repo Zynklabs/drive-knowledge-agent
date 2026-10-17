@@ -11,6 +11,8 @@ All notable changes to this project are documented here. The format follows
 - Claude via the official `anthropic` SDK. The answer model `claude-opus-5-5` runs at explicit effort with `fallbacks="default"` (server-side refusal fallback). Query rewriting and grading use `claude-haiku-5-5` with structured outputs. Missing credentials, rate limits and network errors get clear messages.
 - Hybrid retrieval: the collection stores BM25 sparse vectors (FastEmbed `Qdrant/bm25`) next to the dense vectors. Older collections are detected and need `sync --full`, which now recreates the collection.
 
+- `LLM_PROVIDER=openrouter`: the same Anthropic-SDK requests go through OpenRouter's Anthropic-compatible endpoint (Bearer `OPENROUTER_API_KEY`). Model IDs are mapped to `anthropic/claude-opus-5.5` style, and the Anthropic-only fallback beta is omitted.
+
 ### Changed
 - Defaults: `llm.answer_model=claude-opus-5-5`, `retrieval.top_k=20`, `agent.mode=rag` (agentic mode is planned). Removed the unimplemented `retrieval.rerank`; added `retrieval.grade`, `llm.answer_effort` and `llm.fast_effort`.
 - Indexing (M3): `drive-agent sync` embeds chunks and stores them in Qdrant. The Qdrant server URL is set with `QDRANT_URL`/`QDRANT_API_KEY`; without a URL Qdrant runs embedded on disk, and `:memory:` is used for tests. Default embeddings are open source and local (`nomic-embed-text-v1.5` via FastEmbed, with task prefixes applied); Voyage and OpenAI are optional extras.

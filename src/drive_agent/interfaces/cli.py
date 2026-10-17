@@ -421,8 +421,8 @@ def _answer(agent: DriveAgent, question: str, thread: str | None) -> AgentReply:
         reply = agent.ask(question, thread_id=thread, on_text=first_token)
     console.print()
     if reply.citations:
-        console.print("[bold]Sources[/bold]")
-        for citation in reply.citations:
+        console.print("\n[bold]Sources[/bold]")
+        for citation in sorted(reply.citations, key=lambda c: c["number"]):
             where = (
                 f", page {citation['page']}"
                 if "page" in citation
