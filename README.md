@@ -22,7 +22,7 @@ Spreadsheets and tabular files are **out of scope**: Excel (.xlsx/.xls/.xlsm), G
 Requires [uv](https://docs.astral.sh/uv/). It installs Python 3.11+ for you.
 
 ```bash
-git clone https://github.com/OWNER/drive-knowledge-agent.git
+git clone https://github.com/Zynklabs/drive-knowledge-agent.git
 cd drive-knowledge-agent
 uv sync
 uv run drive-agent init      # writes drive-agent.yaml and a .env template

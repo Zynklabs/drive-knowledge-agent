@@ -58,6 +58,12 @@ dependencies = [
   "typer>=0.12",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Zynklabs/drive-knowledge-agent"
+Repository = "https://github.com/Zynklabs/drive-knowledge-agent"
+Issues = "https://github.com/Zynklabs/drive-knowledge-agent/issues"
+Changelog = "https://github.com/Zynklabs/drive-knowledge-agent/blob/main/CHANGELOG.md"
+
 [project.scripts]
 drive-agent = "drive_agent.interfaces.cli:app"
 
