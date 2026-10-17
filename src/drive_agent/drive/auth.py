@@ -60,6 +60,14 @@ def build_drive_service(credentials: Credentials) -> Any:
     return build("drive", "v3", credentials=credentials, cache_discovery=False)
 
 
+def connect(
+    drive: DriveSettings, data_dir: Path, *, interactive: bool = True
+) -> tuple[DriveAuth, Any]:
+    """Authenticate and return the credentials' description together with a Drive client."""
+    drive_auth = authenticate(drive, data_dir, interactive=interactive)
+    return drive_auth, build_drive_service(drive_auth.credentials)
+
+
 # --- service account -------------------------------------------------------
 
 

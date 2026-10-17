@@ -6,11 +6,13 @@ An open-source agent that indexes a Google Drive folder (including every sub-fol
 - **Built on LangGraph + LangChain.** You can swap the vector store (Chroma, Qdrant, Pinecone, pgvector), the embedding provider, or the LLM through config.
 - **Claude** is the default answer model.
 
-> **Status: pre-alpha (M1).** `init`, `status`, and `check` work so far. See the [roadmap](#roadmap).
+> **Status: pre-alpha (M2).** `init`, `status`, `check`, and `sync --dry-run` (fetch → parse → chunk, nothing written) work so far. See the [roadmap](#roadmap).
 
 ## Supported files
 
 Google Docs, Google Slides, PDF, Word (.docx), PowerPoint (.pptx), plain text, Markdown, HTML, JSON.
+
+How each type is read: Google Docs are exported as Markdown (headings kept, falling back to .docx), and Google Slides as .pptx (slide boundaries and speaker notes kept). PDFs are parsed page by page with `pypdf`, which is BSD-licensed; PyMuPDF is avoided because it is AGPL. Scanned PDFs without a text layer are reported but not OCR'd yet. Every chunk keeps its file, path, Drive link, heading path, and page or slide number for citations.
 
 Spreadsheets and tabular files are **out of scope**: Excel (.xlsx/.xls/.xlsm), Google Sheets, and CSV. They can hold very large datasets that bloat the index and split poorly into chunks for Q&A. Sync skips them and lists them in the sync report.
 
@@ -50,6 +52,7 @@ Secrets (API keys, tokens, database URLs) are read **only** from the environment
 | `drive-agent init` | Interactive setup | M0 ✅ |
 | `drive-agent status` | Resolved config, secrets set, index stats | M0 ✅ |
 | `drive-agent check [--show-skipped]` | Permission doctor for Drive access | M1 ✅ |
+| `drive-agent sync --dry-run [--show-chunks N]` | Fetch, parse and chunk; report per file, write nothing | M2 ✅ |
 | `drive-agent sync [--full]` | Index / re-index | M3 |
 | `drive-agent ask "…"` | One-off question | M4 |
 | `drive-agent ui` | Streamlit app | M5 |

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -186,10 +187,95 @@ def _render_check(result: CheckResult, *, show_skipped: bool) -> None:
 def sync(
     ctx: typer.Context,
     full: Annotated[bool, typer.Option(help="Re-index everything.")] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run", help="Fetch, parse and chunk only. No embeddings, nothing is written."
+        ),
+    ] = False,
+    show_chunks: Annotated[
+        int,
+        typer.Option(
+            "--show-chunks", min=0, help="With --dry-run: print the first N chunks per file."
+        ),
+    ] = 0,
 ) -> None:
     """Index or re-index the configured Drive folders."""
-    _settings(ctx)
-    _not_implemented("sync", "M3")
+    settings = _settings(ctx)
+    if not dry_run:
+        _not_implemented("sync", "M3")
+
+    from drive_agent.drive.auth import DriveAuthError, connect  # deferred: slow imports
+    from drive_agent.indexing.loader import FileResult, load_folder
+
+    # pypdf logs recoverable structure problems (e.g. "wrong pointing object") as warnings;
+    # they don't affect extraction and would clutter the report.
+    logging.getLogger("pypdf").setLevel(logging.ERROR)
+
+    if not settings.drive.folder_ids:
+        err_console.print("[red]No Drive folders configured.[/red] Run `drive-agent init`.")
+        raise typer.Exit(1)
+    try:
+        _auth, service = connect(settings.drive, settings.data_dir)
+    except DriveAuthError as exc:
+        err_console.print(f"[red]Auth error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+    console.print("[bold]Dry run[/bold]: fetching, parsing and chunking only. Nothing is written.")
+    totals = {"files": 0, "chunks": 0, "tokens": 0, "failed": 0, "skipped": 0}
+    folder_failed = False
+    for folder_id in settings.drive.folder_ids:
+        with console.status(f"Reading folder {folder_id}…") as status:
+
+            def progress(result: FileResult) -> None:
+                status.update(f"Parsed {result.file.path}")
+
+            load = load_folder(service, settings, folder_id, on_file=progress)
+
+        console.print()
+        if load.root is None or load.error:
+            folder_failed = True
+            console.print(f"[red]✗ Folder {folder_id}[/red]  {load.error}")
+            if load.root is None:
+                continue
+        console.print(f"[bold]{load.root.name}[/bold] ({load.root.id})")
+        table = Table("", "file", "chunks", "~tokens", "notes", box=None, pad_edge=False)
+        for result in load.files:
+            mark = (
+                "[red]✗[/red]"
+                if result.error
+                else "[yellow]⚠[/yellow]"
+                if result.warnings
+                else "[green]✓[/green]"
+            )
+            notes = result.error or "; ".join(result.warnings)
+            table.add_row(
+                mark, result.file.path, str(len(result.chunks)), f"{result.tokens:,}", notes
+            )
+        console.print(table)
+        if load.skipped:
+            console.print(
+                f"  skipped (see `drive-agent check --show-skipped`): {len(load.skipped)}"
+            )
+
+        for result in load.files:
+            for chunk in result.chunks[:show_chunks]:
+                meta = chunk.metadata
+                console.rule(f"{meta['chunk_id']}  {meta['path']}", style="dim")
+                console.print(chunk.page_content, markup=False, highlight=False)
+
+        totals["files"] += len(load.files)
+        totals["chunks"] += sum(len(r.chunks) for r in load.files)
+        totals["tokens"] += sum(r.tokens for r in load.files)
+        totals["failed"] += sum(1 for r in load.files if r.error)
+        totals["skipped"] += len(load.skipped)
+
+    console.print()
+    console.print(
+        f"Total: {totals['files']} files · {totals['chunks']} chunks · "
+        f"~{totals['tokens']:,} tokens · {totals['failed']} failed · {totals['skipped']} skipped"
+    )
+    raise typer.Exit(1 if folder_failed else 0)
 
 
 @app.command()

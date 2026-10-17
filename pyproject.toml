@@ -37,11 +37,16 @@ classifiers = [
 # Runtime integrations (Google, LangChain/LangGraph, vector stores, Streamlit, Slack)
 # are added as dependencies / optional extras in the milestone that uses them.
 dependencies = [
+  "beautifulsoup4>=4.12",
   "google-api-python-client>=2.150",
   "google-auth>=2.35",
   "google-auth-oauthlib>=1.2",
+  "langchain-text-splitters>=0.3",
   "pydantic>=2.7",
+  "pypdf>=5.1",
+  "python-docx>=1.1",
   "python-dotenv>=1.0",
+  "python-pptx>=1.0",
   "pyyaml>=6.0",
   "rich>=13.7",
   "typer>=0.12",

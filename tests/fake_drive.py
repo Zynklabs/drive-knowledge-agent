@@ -57,6 +57,20 @@ class _Request:
         return self._fn()
 
 
+class Media:
+    """Stands in for a media request; ``fake_download`` turns it into bytes."""
+
+    def __init__(self, payload: bytes | Exception) -> None:
+        self.payload = payload
+
+
+def fake_download(self: Any, request: Media) -> bytes:
+    """Replacement for ``DriveFetcher._download`` used with FakeDrive."""
+    if isinstance(request.payload, Exception):
+        raise request.payload
+    return request.payload
+
+
 class FakeDrive:
     def __init__(
         self,
@@ -67,6 +81,7 @@ class FakeDrive:
         list_errors: dict[str, HttpError] | None = None,
         about_error: Exception | None = None,
         incomplete: bool = False,
+        contents: dict[str, bytes | Exception] | None = None,
     ) -> None:
         self.items = {item["id"]: item for item in items}
         self.user_email = user_email
@@ -75,6 +90,8 @@ class FakeDrive:
         self.about_error = about_error
         self.incomplete = incomplete
         self.list_calls: list[dict[str, Any]] = []
+        self.contents = contents or {}
+        self.media_calls: list[tuple[str, str | None]] = []
 
     # client surface ---------------------------------------------------------
     def files(self) -> FakeDrive:
@@ -94,6 +111,15 @@ class FakeDrive:
         assert kw["includeItemsFromAllDrives"] is True
         self.list_calls.append(kw)
         return _Request(lambda: self._list(kw))
+
+    def export_media(self, fileId: str, mimeType: str) -> Media:
+        self.media_calls.append((fileId, mimeType))
+        return Media(self.contents.get(fileId, b""))
+
+    def get_media(self, fileId: str, **kw: Any) -> Media:
+        assert kw.get("supportsAllDrives") is True
+        self.media_calls.append((fileId, None))
+        return Media(self.contents.get(fileId, b""))
 
     # behaviour --------------------------------------------------------------
     def _about(self) -> dict[str, Any]:

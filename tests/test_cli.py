@@ -184,3 +184,59 @@ def test_check_without_folders() -> None:
     result = runner.invoke(app, ["check"])
     assert result.exit_code == 1
     assert "No Drive folders configured" in result.output
+
+
+# --- sync --dry-run ---------------------------------------------------------
+
+
+def test_sync_dry_run(monkeypatch: pytest.MonkeyPatch, sa_key_file: Path) -> None:
+    from drive_agent.drive.fetcher import DriveFetcher
+
+    from .doc_factory import make_pdf
+    from .fake_drive import fake_download
+
+    monkeypatch.setattr(DriveFetcher, "_download", fake_download)
+    drive = FakeDrive(
+        [
+            folder("root", "Hiring"),
+            file("cv", "Jane.pdf", "application/pdf", "root", size=10),
+            file("bad", "Broken.pdf", "application/pdf", "root", size=10),
+            file("s", "Budget", "application/vnd.google-apps.spreadsheet", "root"),
+        ],
+        contents={"cv": make_pdf(["Jane Doe, engineer"]), "bad": b"junk"},
+    )
+    _use_fake_drive(monkeypatch, sa_key_file, drive)
+    monkeypatch.setenv("DRIVE_FOLDER_IDS", "root")
+
+    result = runner.invoke(app, ["sync", "--dry-run", "--show-chunks", "1"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "Nothing is written" in out
+    assert "Hiring/Jane.pdf" in out
+    assert "unreadable PDF" in out
+    assert "Jane.pdf > page 1" in out  # --show-chunks prints chunk text
+    assert "Jane Doe, engineer" in out
+    assert "Total: 2 files · 1 chunks" in out
+    assert "1 failed · 1 skipped" in out
+
+
+def test_sync_dry_run_missing_folder(monkeypatch: pytest.MonkeyPatch, sa_key_file: Path) -> None:
+    _use_fake_drive(monkeypatch, sa_key_file, FakeDrive([]))
+    monkeypatch.setenv("DRIVE_FOLDER_IDS", "nope")
+    result = runner.invoke(app, ["sync", "--dry-run"])
+    assert result.exit_code == 1
+    assert "✗ Folder nope" in result.output
+
+
+def test_sync_dry_run_auth_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(tmp_path / "missing.json"))
+    monkeypatch.setenv("DRIVE_FOLDER_IDS", "root")
+    result = runner.invoke(app, ["sync", "--dry-run"])
+    assert result.exit_code == 1
+    assert "Auth error" in result.output
+
+
+def test_sync_dry_run_without_folders() -> None:
+    result = runner.invoke(app, ["sync", "--dry-run"])
+    assert result.exit_code == 1
+    assert "No Drive folders configured" in result.output

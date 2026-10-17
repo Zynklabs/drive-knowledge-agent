@@ -50,6 +50,8 @@ def explain(exc: Exception, *, identity: str | None = None, folder_id: str | Non
             "The Google Drive API is not enabled for this Google Cloud project. "
             f"Enable it at {ENABLE_API_URL}, wait a minute, then retry."
         )
+    if "exportSizeLimitExceeded" in reasons:
+        return "Google can only export documents up to 10 MB; this one is too large to export."
     if reasons & {"insufficientPermissions", "ACCESS_TOKEN_SCOPE_INSUFFICIENT"}:
         return (
             "The credentials do not include the drive.readonly scope. "
