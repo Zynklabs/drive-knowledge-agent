@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 import yaml
@@ -18,6 +18,10 @@ from drive_agent.core.config import (
     extract_folder_id,
     load_settings,
 )
+from drive_agent.drive.models import SKIP_LABELS
+
+if TYPE_CHECKING:
+    from drive_agent.drive.doctor import CheckResult
 
 app = typer.Typer(
     name="drive-agent",
@@ -118,10 +122,64 @@ def init(
 
 
 @app.command()
-def check(ctx: typer.Context) -> None:
+def check(
+    ctx: typer.Context,
+    show_skipped: Annotated[
+        bool, typer.Option("--show-skipped", help="List every skipped file and why.")
+    ] = False,
+) -> None:
     """Verify Drive auth, read-only scope, and folder visibility."""
-    _settings(ctx)
-    _not_implemented("check", "M1")
+    from drive_agent.drive import doctor  # deferred: Google client import is slow
+
+    settings = _settings(ctx)
+    with console.status("Checking Google Drive access…"):
+        result = doctor.run_check(settings)
+    _render_check(result, show_skipped=show_skipped)
+    raise typer.Exit(0 if result.ok else 1)
+
+
+def _render_check(result: CheckResult, *, show_skipped: bool) -> None:
+    if result.description is None:
+        console.print(f"[red]✗ Auth ({result.mode})[/red]  {result.error}")
+        return
+    who = result.identity or "unknown identity"
+    as_who = "" if who in result.description else f" as [bold]{who}[/bold]"
+    if result.error:
+        console.print(f"[red]✗ Auth[/red]  {result.description}{as_who}")
+        console.print(f"  {result.error}")
+        return
+    console.print(f"[green]✓ Auth[/green]  {result.description}{as_who}")
+    console.print("  scope: drive.readonly (read-only)")
+
+    for folder in result.folders:
+        console.print()
+        if folder.report is None:
+            console.print(f"[red]✗ Folder {folder.folder_id}[/red]")
+            console.print(f"  {folder.error}")
+            continue
+        report, stats = folder.report, folder.report.stats
+        where = "Shared Drive" if report.root.drive_id else "My Drive"
+        console.print(
+            f"[green]✓ Folder[/green]  [bold]{report.root.name}[/bold] ({report.root.id}) · {where}"
+        )
+        kinds = ", ".join(f"{k} {n}" for k, n in sorted(report.kinds().items()))
+        console.print(f"  files to index: {len(report.files)}" + (f" ({kinds})" if kinds else ""))
+        console.print(f"  sub-folders: {stats.folders} · shortcuts: {stats.shortcuts}")
+        if report.skipped:
+            reasons = ", ".join(
+                f"{n} {SKIP_LABELS[reason]}" for reason, n in report.skip_reasons().most_common()
+            )
+            console.print(f"  skipped: {reasons}")
+        if stats.depth_limited:
+            console.print(f"  not entered (max_depth): {stats.depth_limited} sub-folder(s)")
+        for warning in folder.warnings:
+            console.print(f"  [yellow]⚠ {warning}[/yellow]")
+        if show_skipped and report.skipped:
+            table = Table("path", "reason", "type")
+            for item in report.skipped:
+                reason = SKIP_LABELS[item.reason] + (f" ({item.detail})" if item.detail else "")
+                table.add_row(item.path, reason, item.mime_type)
+            console.print(table)
 
 
 @app.command()

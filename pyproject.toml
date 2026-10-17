@@ -37,6 +37,9 @@ classifiers = [
 # Runtime integrations (Google, LangChain/LangGraph, vector stores, Streamlit, Slack)
 # are added as dependencies / optional extras in the milestone that uses them.
 dependencies = [
+  "google-api-python-client>=2.150",
+  "google-auth>=2.35",
+  "google-auth-oauthlib>=1.2",
   "pydantic>=2.7",
   "python-dotenv>=1.0",
   "pyyaml>=6.0",
@@ -53,6 +56,7 @@ dev = [
   "pre-commit>=3.8",
   "pytest>=8.3",
   "pytest-cov>=5.0",
+  "rsa>=4.9",
   "ruff>=0.6",
   "types-PyYAML>=6.0",
 ]
@@ -72,7 +76,7 @@ src = ["src", "tests"]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "S", "PT"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]
+"tests/**" = ["S101", "S105", "S106"]  # asserts and fake test tokens
 
 [tool.mypy]
 python_version = "3.11"
@@ -80,6 +84,15 @@ strict = true
 plugins = ["pydantic.mypy"]
 mypy_path = "src"
 packages = ["drive_agent"]
+
+[[tool.mypy.overrides]]
+module = ["googleapiclient.*", "google_auth_oauthlib.*"]
+ignore_missing_imports = true
+
+# google-auth ships py.typed but leaves many functions unannotated.
+[[tool.mypy.overrides]]
+module = ["drive_agent.drive.auth"]
+disallow_untyped_calls = false
 
 [tool.pydantic-mypy]
 init_forbid_extra = true

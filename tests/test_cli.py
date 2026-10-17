@@ -6,10 +6,22 @@ from typer.testing import CliRunner
 
 from drive_agent import __version__
 from drive_agent.core.config import load_settings
+from drive_agent.drive import auth
+from drive_agent.interfaces import cli
 from drive_agent.interfaces.cli import app
+
+from .conftest import SA_EMAIL
+from .fake_drive import FakeDrive, file, folder, http_error
 
 FOLDER = "1AbCdEfGhIjKlMnOpQrStUvWxYz_-0123"
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def wide_console(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop Rich from wrapping long lines at 80 columns, so assertions see whole lines."""
+    monkeypatch.setattr(cli.console, "width", 200)
+    monkeypatch.setattr(cli.err_console, "width", 200)
 
 
 def test_version() -> None:
@@ -100,7 +112,6 @@ def test_bad_config_exits_with_message(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize(
     ("args", "milestone"),
     [
-        (["check"], "M1"),
         (["sync"], "M3"),
         (["sync", "--full"], "M3"),
         (["ask", "What is our leave policy?"], "M4"),
@@ -113,3 +124,63 @@ def test_unimplemented_commands(args: list[str], milestone: str) -> None:
     assert result.exit_code == 1
     assert "not implemented yet" in result.output
     assert milestone in result.output
+
+
+# --- check ------------------------------------------------------------------
+
+DOC = "application/vnd.google-apps.document"
+
+
+def _use_fake_drive(monkeypatch: pytest.MonkeyPatch, sa_key_file: Path, drive: FakeDrive) -> None:
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(sa_key_file))
+    monkeypatch.setattr(auth, "build_drive_service", lambda creds: drive)
+
+
+def test_check_success(monkeypatch: pytest.MonkeyPatch, sa_key_file: Path) -> None:
+    drive = FakeDrive(
+        [
+            folder("root", "Company", driveId="sd"),
+            file("d", "Handbook", DOC, "root"),
+            file("s", "Budget", "application/vnd.google-apps.spreadsheet", "root"),
+            folder("sub", "HR", "root"),
+        ],
+        user_email=SA_EMAIL,
+    )
+    _use_fake_drive(monkeypatch, sa_key_file, drive)
+    monkeypatch.setenv("DRIVE_FOLDER_IDS", "root")
+
+    result = runner.invoke(app, ["check", "--show-skipped"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert f"✓ Auth  service account {SA_EMAIL}\n" in out
+    assert "drive.readonly (read-only)" in out
+    assert "Company (root) · Shared Drive" in out
+    assert "files to index: 1 (docs 1)" in out
+    assert "sub-folders: 1" in out
+    assert "1 out of scope" in out
+    assert "Company/Budget" in out  # --show-skipped table
+
+
+def test_check_folder_not_shared(monkeypatch: pytest.MonkeyPatch, sa_key_file: Path) -> None:
+    _use_fake_drive(monkeypatch, sa_key_file, FakeDrive([], user_email=SA_EMAIL))
+    monkeypatch.setenv("DRIVE_FOLDER_IDS", "missing")
+    result = runner.invoke(app, ["check"])
+    assert result.exit_code == 1
+    assert "✗ Folder missing" in result.output
+    assert "not shared with" in result.output
+
+
+def test_check_api_disabled(monkeypatch: pytest.MonkeyPatch, sa_key_file: Path) -> None:
+    drive = FakeDrive([], about_error=http_error(403, "accessNotConfigured"))
+    _use_fake_drive(monkeypatch, sa_key_file, drive)
+    monkeypatch.setenv("DRIVE_FOLDER_IDS", "root")
+    result = runner.invoke(app, ["check"])
+    assert result.exit_code == 1
+    assert "✗ Auth" in result.output
+    assert "not enabled" in result.output
+
+
+def test_check_without_folders() -> None:
+    result = runner.invoke(app, ["check"])
+    assert result.exit_code == 1
+    assert "No Drive folders configured" in result.output

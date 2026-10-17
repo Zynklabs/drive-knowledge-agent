@@ -6,7 +6,7 @@ An open-source agent that indexes a Google Drive folder (including every sub-fol
 - **Built on LangGraph + LangChain.** You can swap the vector store (Chroma, Qdrant, Pinecone, pgvector), the embedding provider, or the LLM through config.
 - **Claude** is the default answer model.
 
-> **Status: pre-alpha (M0, the repo scaffold).** Only `init` and `status` work so far. See the [roadmap](#roadmap).
+> **Status: pre-alpha (M1).** `init`, `status`, and `check` work so far. See the [roadmap](#roadmap).
 
 ## Supported files
 
@@ -24,7 +24,14 @@ cd drive-knowledge-agent
 uv sync
 uv run drive-agent init      # writes drive-agent.yaml and a .env template
 uv run drive-agent status    # shows resolved config and which secrets are set
+uv run drive-agent check     # verifies read-only Drive access and lists what will be indexed
 ```
+
+## Google Drive access
+
+Access is always **read-only** (`drive.readonly`). Use a service account (share the folder with it as Viewer, use domain-wide delegation, or run keyless on Google Cloud), or sign in with your own Google account via OAuth.
+
+Step-by-step setup: **[docs/google-drive-access.md](docs/google-drive-access.md)**.
 
 ## Configuration
 
@@ -42,7 +49,7 @@ Secrets (API keys, tokens, database URLs) are read **only** from the environment
 |---|---|---|
 | `drive-agent init` | Interactive setup | M0 ✅ |
 | `drive-agent status` | Resolved config, secrets set, index stats | M0 ✅ |
-| `drive-agent check` | Permission doctor for Drive access | M1 |
+| `drive-agent check [--show-skipped]` | Permission doctor for Drive access | M1 ✅ |
 | `drive-agent sync [--full]` | Index / re-index | M3 |
 | `drive-agent ask "…"` | One-off question | M4 |
 | `drive-agent ui` | Streamlit app | M5 |
