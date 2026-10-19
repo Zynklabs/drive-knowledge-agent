@@ -7,6 +7,12 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Faster Drive walking with identical results:
+  - A whole Shared Drive is listed flat in a few requests. On a 692-folder, 3,386-item drive the check went from about 7 min to 17 s.
+  - Other trees list each folder with its own query, 8 in parallel: 250 folders went from 144 s to 23 s.
+  - Folders are never combined into one `or` query, because Drive silently drops some children from those. That was caught when an early version missed 4 Google Docs; the file sets are now verified identical to a one-folder-at-a-time walk.
+- Live progress in `check` and `sync` (folders scanned, items listed, files processed).
+- A Shared Drive used as the root now shows its real name instead of "Drive", in output and citation paths.
 - Auto-sync, owned by the agent: a new `KnowledgeBase` core object bundles the index, conversation memory, the agent and the index's freshness.
   - Long-running hosts (Slack bot, web app, and the new `drive-agent sync --watch`) re-sync on `ingest.schedule_cron` / `SYNC_SCHEDULE` (cron, UTC, default every 6 hours, `off` to disable). They catch up immediately at startup when a scheduled run was missed.
   - All syncs (scheduled, CLI, web app, `/drive-agent sync`) go through one coordinator, so they never overlap.

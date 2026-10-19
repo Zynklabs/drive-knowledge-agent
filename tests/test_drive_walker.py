@@ -267,3 +267,105 @@ def test_root_shortcut_to_file_rejected() -> None:
     drive = FakeDrive([shortcut("sc", "Link", "x", "doc", DOC)])
     with pytest.raises(NotAFolderError, match="shortcut to a file"):
         DriveWalker(drive, DriveSettings()).resolve_root("sc")
+
+
+# --- fast listing -------------------------------------------------------------
+
+
+def _tree(subfolders: int, drive_id: str | None = None) -> list[dict[str, Any]]:
+    extra = {"driveId": drive_id} if drive_id else {}
+    root_id = drive_id or "root"
+    items = [folder(root_id, "Root", **extra)]
+    for i in range(subfolders):
+        items.append(folder(f"sub{i}", f"Sub{i}", root_id, **extra))
+        items.append(file(f"doc{i}", f"Doc{i}", DOC, f"sub{i}", **extra))
+        items.append(folder(f"deep{i}", f"Deep{i}", f"sub{i}", **extra))
+        items.append(file(f"deepdoc{i}", f"DeepDoc{i}", DOC, f"deep{i}", **extra))
+    return items
+
+
+def test_parallel_listing_matches_sequential_and_never_combines_folders() -> None:
+    sequential, parallel = FakeDrive(_tree(30)), FakeDrive(_tree(30))
+    w1 = DriveWalker(sequential, DriveSettings(), workers=1)
+    w8 = DriveWalker(parallel, DriveSettings(), workers=8)
+    r1 = w1.scan(w1.resolve_root("root"))
+    r8 = w8.scan(w8.resolve_root("root"))
+    assert [(f.id, f.path) for f in r8.files] == [(f.id, f.path) for f in r1.files]  # same order
+    assert len(r8.files) == 60
+    # One query per folder (root + 60): Drive drops results from "'a' in parents or ..." queries.
+    assert len(parallel.list_calls) == 61
+    assert not any(" or " in call["q"] for call in parallel.list_calls)
+
+
+def test_whole_shared_drive_is_listed_flat() -> None:
+    drive = FakeDrive(_tree(30, drive_id="0Adrive"))
+    walker = DriveWalker(drive, DriveSettings(), page_size=50)
+    report = walker.scan(walker.resolve_root("0Adrive"))
+    assert len(report.files) == 60
+    assert {c["corpora"] for c in drive.list_calls} == {"drive"}
+    assert all(c["driveId"] == "0Adrive" for c in drive.list_calls)
+    assert len(drive.list_calls) == 3  # 120 items in pages of 50, nothing per folder
+    assert report.stats.folders == 60
+    assert "Root/Sub7/Deep7/DeepDoc7" in {f.path for f in report.files}
+
+
+def test_flat_listing_respects_depth_and_follows_shortcuts_out_of_the_drive() -> None:
+    items = _tree(2, drive_id="0Adrive")
+    items += [
+        folder("outside", "Outside"),  # in someone's My Drive
+        file("o1", "OutsideDoc", DOC, "outside"),
+        shortcut("sc", "Link out", "0Adrive", "outside", FOLDER),
+    ]
+    items[-1]["driveId"] = "0Adrive"
+    drive = FakeDrive(items)
+    walker = DriveWalker(drive, DriveSettings(max_depth=1))
+    report = walker.scan(walker.resolve_root("0Adrive"))
+    assert {f.path for f in report.files} == {
+        "Root/Sub0/Doc0",
+        "Root/Sub1/Doc1",
+        "Root/Link out/OutsideDoc",
+    }
+    assert report.stats.depth_limited == 2  # Deep0, Deep1
+    outside_calls = [c for c in drive.list_calls if c["corpora"] == "allDrives"]
+    assert len(outside_calls) == 1  # only the shortcut target needed its own query
+
+
+def test_one_unreadable_folder_does_not_hide_others() -> None:
+    drive = FakeDrive(
+        [
+            folder("root", "R"),
+            folder("a", "A", "root"),
+            file("fa", "DocA", DOC, "a"),
+            shortcut("sc", "Private", "root", "private", FOLDER),
+            folder("b", "B", "root"),
+            file("fb", "DocB", DOC, "b"),
+        ],
+        list_errors={"private": http_error(404, "notFound")},
+    )
+    walker = DriveWalker(drive, DriveSettings())
+    report = walker.scan(walker.resolve_root("root"))
+    assert {f.id for f in report.files} == {"fa", "fb"}
+    assert report.stats.inaccessible_folders == 1
+
+
+def test_progress_is_reported() -> None:
+    seen: list[tuple[int, int]] = []
+    walker = DriveWalker(
+        FakeDrive(_tree(30)),
+        DriveSettings(),
+        on_progress=lambda f, i: seen.append((f, i)),
+    )
+    walker.scan(walker.resolve_root("root"))
+    assert [folders for folders, _ in seen] == list(range(1, 62))  # root + 30 + 30 folders
+    assert seen[-1][1] == 120  # every listed item counted
+
+
+def test_shared_drive_root_uses_the_drive_name() -> None:
+    items = _tree(1, drive_id="0Adrive")
+    named = FakeDrive(items, drive_names={"0Adrive": "Compliance"})
+    walker = DriveWalker(named, DriveSettings())
+    report = walker.scan(walker.resolve_root("0Adrive"))
+    assert report.root.name == "Compliance"
+    assert "Compliance/Sub0/Doc0" in {f.path for f in report.files}
+    unnamed = DriveWalker(FakeDrive(items), DriveSettings())  # drives.get fails: keep folder name
+    assert unnamed.resolve_root("0Adrive").name == "Root"

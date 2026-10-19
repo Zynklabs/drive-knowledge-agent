@@ -10,9 +10,10 @@ import sys
 import threading
 import uuid
 import warnings
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 import yaml
@@ -37,7 +38,7 @@ if TYPE_CHECKING:
     from drive_agent.core.agent import AgentReply, DriveAgent
     from drive_agent.core.knowledge_base import KnowledgeBase
     from drive_agent.drive.doctor import CheckResult
-    from drive_agent.indexing.loader import FolderLoad
+    from drive_agent.indexing.loader import FileResult, FolderLoad
 
 app = typer.Typer(
     name="drive-agent",
@@ -171,8 +172,8 @@ def check(
     from drive_agent.drive import doctor  # deferred: Google client import is slow
 
     settings = _settings(ctx)
-    with console.status("Checking Google Drive access…"):
-        result = doctor.run_check(settings)
+    with console.status("Checking Google Drive access…") as status:
+        result = doctor.run_check(settings, on_scan=_scan_progress(status))
     _render_check(result, show_skipped=show_skipped)
     raise typer.Exit(0 if result.ok else 1)
 
@@ -239,6 +240,24 @@ def _watch(ctx: typer.Context, *, conflicting: bool) -> None:
         console.print("Stopped.")
     finally:
         kb.close()
+
+
+def _scan_progress(status: Any) -> Callable[[int, int], None]:
+    def update(folders: int, items: int) -> None:
+        status.update(f"Scanning Drive… {folders:,} folders · {items:,} items listed")
+
+    return update
+
+
+def _file_progress(status: Any, verb: str) -> Callable[[FileResult], None]:
+    count = 0
+
+    def update(result: FileResult) -> None:
+        nonlocal count
+        count += 1
+        status.update(f"{verb} {count:,} files · {result.file.path}")
+
+    return update
 
 
 def _render_load(load: FolderLoad, show_chunks: int) -> None:
@@ -312,7 +331,7 @@ def sync(
         _watch(ctx, conflicting=dry_run or full)
         return
     from drive_agent.drive.auth import DriveAuthError, connect  # deferred: slow imports
-    from drive_agent.indexing.loader import FileResult, load_folder
+    from drive_agent.indexing.loader import load_folder
 
     settings = _settings(ctx)
     # pypdf logs recoverable structure problems (e.g. "wrong pointing object") as warnings;
@@ -337,11 +356,15 @@ def sync(
         loads: list[FolderLoad] = []
         for folder_id in settings.drive.folder_ids:
             with console.status(f"Reading folder {folder_id}…") as status:
-
-                def progress(result: FileResult) -> None:
-                    status.update(f"Parsed {result.file.path}")
-
-                loads.append(load_folder(service, settings, folder_id, on_file=progress))
+                loads.append(
+                    load_folder(
+                        service,
+                        settings,
+                        folder_id,
+                        on_file=_file_progress(status, "Parsed"),
+                        on_scan=_scan_progress(status),
+                    )
+                )
             _render_load(loads[-1], show_chunks)
         _print_totals(loads)
         raise typer.Exit(1 if _folder_failed(loads) else 0)
@@ -372,7 +395,8 @@ def sync(
                 vector_index,
                 records,
                 full=full,
-                on_file=lambda result: status.update(f"Processed {result.file.path}"),
+                on_file=_file_progress(status, "Embedded"),
+                on_scan=_scan_progress(status),
             )
     except SyncError as exc:
         err_console.print(f"[red]Sync stopped:[/red] {exc}")

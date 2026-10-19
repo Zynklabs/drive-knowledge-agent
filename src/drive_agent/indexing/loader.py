@@ -15,7 +15,7 @@ from drive_agent.core.config import IngestSettings, Settings
 from drive_agent.drive.errors import explain
 from drive_agent.drive.fetcher import DriveFetcher, FileTooLargeError
 from drive_agent.drive.models import DriveFile, DriveFolder, SkippedFile
-from drive_agent.drive.walker import DriveWalker, NotAFolderError
+from drive_agent.drive.walker import DriveWalker, NotAFolderError, Progress
 from drive_agent.parsing import ParseError, parse
 
 
@@ -66,9 +66,10 @@ def load_folder(
     folder_id: str,
     *,
     on_file: Callable[[FileResult], None] | None = None,
+    on_scan: Progress | None = None,
 ) -> FolderLoad:
     load = FolderLoad(folder_id=folder_id)
-    walker = DriveWalker(service, settings.drive)
+    walker = DriveWalker(service, settings.drive, on_progress=on_scan)
     fetcher = DriveFetcher(service, max_bytes=settings.drive.max_file_mb * 1024 * 1024)
     try:
         load.root = walker.resolve_root(folder_id)

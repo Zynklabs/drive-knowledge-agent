@@ -21,6 +21,7 @@ from langchain_core.documents import Document
 from langchain_core.indexing import index
 
 from drive_agent.core.config import Settings
+from drive_agent.drive.walker import Progress
 from drive_agent.indexing.loader import FileResult, FolderLoad, load_folder
 from drive_agent.indexing.state import STATE_DB, SQLiteRecordManager
 from drive_agent.vectorstores.base import VectorIndex
@@ -75,6 +76,7 @@ def run_sync(
     *,
     full: bool = False,
     on_file: Callable[[FileResult], None] | None = None,
+    on_scan: Progress | None = None,
 ) -> SyncReport:
     started = time.monotonic()
     report = SyncReport()
@@ -95,7 +97,7 @@ def run_sync(
 
     def documents() -> Iterator[Document]:
         for folder_id in settings.drive.folder_ids:
-            load = load_folder(service, settings, folder_id, on_file=on_file)
+            load = load_folder(service, settings, folder_id, on_file=on_file, on_scan=on_scan)
             report.folders.append(load)
             for result in load.files:
                 yield from result.chunks
@@ -147,6 +149,7 @@ def sync_now(
     *,
     full: bool = False,
     on_file: Callable[[FileResult], None] | None = None,
+    on_scan: Progress | None = None,
 ) -> SyncReport:
     """Connect to Drive (non-interactively) and run one sync. Used by the web app and Slack.
 
@@ -157,7 +160,9 @@ def sync_now(
     _auth, service = connect(settings.drive, settings.data_dir, interactive=False)
     records = SQLiteRecordManager(vector_index.namespace, settings.data_dir / STATE_DB)
     try:
-        return run_sync(service, settings, vector_index, records, full=full, on_file=on_file)
+        return run_sync(
+            service, settings, vector_index, records, full=full, on_file=on_file, on_scan=on_scan
+        )
     finally:
         records.close()
 

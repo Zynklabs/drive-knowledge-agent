@@ -1,9 +1,22 @@
-"""Breadth-first walk of a Drive folder tree, including Shared Drives and shortcuts."""
+"""Breadth-first walk of a Drive folder tree, including Shared Drives and shortcuts.
+
+Listing is kept fast without trading away completeness:
+- a whole Shared Drive is listed flat (``corpora=drive``) in a few paged requests and the
+  folder tree is rebuilt in memory from each item's ``parents``;
+- any other tree is walked level by level, listing each folder with its own
+  ``'<id>' in parents`` query, several folders at a time in parallel.
+
+Folders are never combined into one ``'a' in parents or 'b' in parents`` query: Drive
+silently omits some children from such queries that the single-folder query returns.
+"""
 
 from __future__ import annotations
 
-from collections import deque
-from collections.abc import Iterator
+import threading
+from collections import defaultdict, deque
+from collections.abc import Callable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, field
 from typing import Any
 
 from googleapiclient.errors import HttpError
@@ -20,7 +33,7 @@ from drive_agent.drive.models import (
 )
 
 FILE_FIELDS = (
-    "id,name,mimeType,modifiedTime,md5Checksum,size,webViewLink,driveId,"
+    "id,name,mimeType,parents,modifiedTime,md5Checksum,size,webViewLink,driveId,"
     "owners(emailAddress),shortcutDetails(targetId,targetMimeType)"
 )
 LIST_FIELDS = f"nextPageToken,incompleteSearch,files({FILE_FIELDS})"
@@ -29,8 +42,22 @@ ROOT_FIELDS = (
 )
 
 
+PARALLEL_FOLDERS = 8  # concurrent single-folder listings; well within Drive API quotas
+
+Progress = Callable[[int, int], None]
+"""Called as ``progress(folders_scanned, items_listed)`` while walking."""
+
+
 class NotAFolderError(Exception):
     """The configured ID points at a file, not a folder."""
+
+
+@dataclass
+class _DriveListing:
+    """A whole Shared Drive, listed once: children by parent ID and the drive's folder IDs."""
+
+    children: dict[str, list[dict[str, Any]]] = field(default_factory=lambda: defaultdict(list))
+    folders: set[str] = field(default_factory=set)
 
 
 class DriveWalker:
@@ -43,11 +70,19 @@ class DriveWalker:
         *,
         page_size: int = 1000,
         num_retries: int = 5,
+        workers: int = PARALLEL_FOLDERS,
+        on_progress: Progress | None = None,
     ) -> None:
+        self._service = service
         self._files = service.files()
         self._settings = settings
         self._page_size = page_size
         self._retries = num_retries  # googleapiclient backs off on 429, 5xx and rate-limit 403s
+        self._workers = max(1, workers)
+        self._on_progress = on_progress
+        self._local = threading.local()
+        self._scanned = 0
+        self._listed = 0
         self.stats = WalkStats()
 
     def resolve_root(self, folder_id: str) -> DriveFolder:
@@ -59,9 +94,12 @@ class DriveWalker:
             meta = self._get(details["targetId"], ROOT_FIELDS)
         if meta["mimeType"] != FOLDER:
             raise NotAFolderError(f"{meta['name']!r} ({folder_id}) is a file, not a folder")
+        name = meta["name"]
+        if meta.get("driveId") == meta["id"]:  # a Shared Drive's root is just called "Drive"
+            name = self._shared_drive_name(meta["id"]) or name
         return DriveFolder(
             id=meta["id"],
-            name=meta["name"],
+            name=name,
             drive_id=meta.get("driveId"),
             can_edit=bool((meta.get("capabilities") or {}).get("canEdit")),
         )
@@ -78,19 +116,52 @@ class DriveWalker:
 
     def walk(self, root: DriveFolder) -> Iterator[DriveFile | SkippedFile]:
         """Yield every file under ``root``, either indexable or skipped with a reason."""
-        queue: deque[tuple[str, str, int]] = deque([(root.id, root.name, 0)])
+        listing = self._list_shared_drive(root) if root.drive_id == root.id else None
         seen: set[str] = {root.id}
-        while queue:
-            folder_id, path, depth = queue.popleft()
-            try:
-                for item in self._list_children(folder_id):
-                    yield from self._visit(item, root, path, depth, queue, seen)
-            except HttpError as exc:
-                # A sub-folder we cannot open (e.g. a shortcut into a folder that is not
-                # shared with us) is counted, not fatal. The root must always be readable.
-                if folder_id == root.id or exc.resp.status not in (403, 404):
-                    raise
-                self.stats.inaccessible_folders += 1
+        frontier: list[tuple[str, str, int]] = [(root.id, root.name, 0)]
+        with ThreadPoolExecutor(max_workers=self._workers) as pool:
+            while frontier:
+                # Start every listing for this level, then consume them in order so paths and
+                # ordering are the same as a sequential walk.
+                pending = [
+                    (entry, self._start_listing(pool, entry[0], listing)) for entry in frontier
+                ]
+                queue: deque[tuple[str, str, int]] = deque()
+                for (folder_id, path, depth), children in pending:
+                    for item in self._finish_listing(children, folder_id, root):
+                        yield from self._visit(item, root, path, depth, queue, seen)
+                    self._scanned += 1
+                    if self._on_progress is not None:
+                        self._on_progress(self._scanned, self._listed)
+                frontier = list(queue)
+
+    def _start_listing(
+        self, pool: ThreadPoolExecutor, folder_id: str, listing: _DriveListing | None
+    ) -> list[dict[str, Any]] | Future[list[dict[str, Any]]]:
+        if listing is not None and folder_id in listing.folders:
+            return listing.children.get(folder_id, [])
+        # Not in a pre-listed Shared Drive (or reached through a shortcut): ask Drive.
+        return pool.submit(self._list_children, folder_id)
+
+    def _finish_listing(
+        self,
+        children: list[dict[str, Any]] | Future[list[dict[str, Any]]],
+        folder_id: str,
+        root: DriveFolder,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(children, Future):
+            return children
+        try:
+            items = children.result()
+        except HttpError as exc:
+            # A sub-folder we cannot open (e.g. a shortcut into a folder that is not shared
+            # with us) is counted, not fatal. The root must always be readable.
+            if folder_id == root.id or exc.resp.status not in (403, 404):
+                raise
+            self.stats.inaccessible_folders += 1
+            return []
+        self._listed += len(items)
+        return items
 
     def _visit(
         self,
@@ -190,33 +261,81 @@ class DriveWalker:
             detail=detail,
         )
 
+    def _shared_drive_name(self, drive_id: str) -> str | None:
+        try:
+            drive: dict[str, Any] = (
+                self._service.drives()
+                .get(driveId=drive_id, fields="name")
+                .execute(num_retries=self._retries)
+            )
+        except HttpError:
+            return None
+        name = drive.get("name")
+        return name if isinstance(name, str) and name else None
+
+    def _thread_files(self) -> Any:
+        """A ``files()`` resource per thread: the Drive client's HTTP layer isn't thread-safe."""
+        files = getattr(self._local, "files", None)
+        if files is None:
+            files = _service_for_thread(self._service).files()
+            self._local.files = files
+        return files
+
     def _get(self, file_id: str, fields: str) -> dict[str, Any]:
         result: dict[str, Any] = self._files.get(
             fileId=file_id, fields=fields, supportsAllDrives=True
         ).execute(num_retries=self._retries)
         return result
 
-    def _list_children(self, folder_id: str) -> Iterator[dict[str, Any]]:
+    def _list_children(self, folder_id: str) -> list[dict[str, Any]]:
+        """All children of one folder (runs on a worker thread)."""
         # corpora=allDrives so folders inside Shared Drives (incl. ones reached via
-        # shortcuts) are listed; the parents filter keeps the query narrow.
+        # shortcuts) are listed.
         query = f"'{_escape(folder_id)}' in parents and trashed = false"
+        return list(self._paged(q=query, corpora="allDrives"))
+
+    def _list_shared_drive(self, root: DriveFolder) -> _DriveListing:
+        """List a whole Shared Drive at once; far fewer requests than walking it."""
+        listing = _DriveListing(folders={root.id})
+        for item in self._paged(q="trashed = false", corpora="drive", driveId=root.drive_id):
+            self._listed += 1
+            for parent in item.get("parents") or []:
+                listing.children[parent].append(item)
+            if item["mimeType"] == FOLDER:
+                listing.folders.add(item["id"])
+        return listing
+
+    def _paged(self, **params: Any) -> Iterator[dict[str, Any]]:
         page_token: str | None = None
         while True:
-            response: dict[str, Any] = self._files.list(
-                q=query,
-                fields=LIST_FIELDS,
-                pageSize=self._page_size,
-                pageToken=page_token,
-                corpora="allDrives",
-                supportsAllDrives=True,
-                includeItemsFromAllDrives=True,
-            ).execute(num_retries=self._retries)
+            response: dict[str, Any] = (
+                self._thread_files()
+                .list(
+                    fields=LIST_FIELDS,
+                    pageSize=self._page_size,
+                    pageToken=page_token,
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
+                    **params,
+                )
+                .execute(num_retries=self._retries)
+            )
             if response.get("incompleteSearch"):
                 self.stats.incomplete = True
             yield from response.get("files", [])
             page_token = response.get("nextPageToken")
             if not page_token:
                 return
+
+
+def _service_for_thread(service: Any) -> Any:
+    """A new Drive client sharing ``service``'s credentials, or ``service`` itself (tests)."""
+    credentials = getattr(getattr(service, "_http", None), "credentials", None)
+    if credentials is None:
+        return service
+    from drive_agent.drive.auth import build_drive_service
+
+    return build_drive_service(credentials)
 
 
 def _escape(value: str) -> str:

@@ -14,7 +14,7 @@ from drive_agent.core.config import Settings
 from drive_agent.drive import auth
 from drive_agent.drive.errors import explain
 from drive_agent.drive.models import WalkReport
-from drive_agent.drive.walker import DriveWalker, NotAFolderError
+from drive_agent.drive.walker import DriveWalker, NotAFolderError, Progress
 
 
 @dataclass
@@ -51,6 +51,7 @@ def run_check(
     *,
     service_factory: ServiceFactory | None = None,
     interactive: bool = True,
+    on_scan: Progress | None = None,
 ) -> CheckResult:
     result = CheckResult(mode=settings.drive.auth_mode)
     if not settings.drive.folder_ids:
@@ -77,15 +78,19 @@ def run_check(
     result.identity = (about.get("user") or {}).get("emailAddress") or result.identity
 
     for folder_id in settings.drive.folder_ids:
-        result.folders.append(_check_folder(service, settings, folder_id, result.identity))
+        result.folders.append(_check_folder(service, settings, folder_id, result.identity, on_scan))
     return result
 
 
 def _check_folder(
-    service: Any, settings: Settings, folder_id: str, identity: str | None
+    service: Any,
+    settings: Settings,
+    folder_id: str,
+    identity: str | None,
+    on_scan: Progress | None = None,
 ) -> FolderCheck:
     check = FolderCheck(folder_id=folder_id)
-    walker = DriveWalker(service, settings.drive)
+    walker = DriveWalker(service, settings.drive, on_progress=on_scan)
     try:
         root = walker.resolve_root(folder_id)
         check.report = walker.scan(root)

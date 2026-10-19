@@ -12,7 +12,11 @@ from googleapiclient.errors import HttpError
 
 from drive_agent.drive.mime import FOLDER, SHORTCUT
 
-PARENT_QUERY = re.compile(r"'([^']+)' in parents and trashed = false")
+# "'a' in parents and trashed = false" or "('a' in parents or 'b' in parents) and trashed = false"
+PARENTS_QUERY = re.compile(
+    r"\(?(?P<parents>'[^']+' in parents(?: or '[^']+' in parents)*)\)? and trashed = false"
+)
+PARENT_ID = re.compile(r"'([^']+)' in parents")
 
 
 def http_error(status: int, reason: str = "", message: str = "error") -> HttpError:
@@ -71,6 +75,16 @@ def fake_download(self: Any, request: Media) -> bytes:
     return request.payload
 
 
+class _Drives:
+    def __init__(self, names: dict[str, str]) -> None:
+        self._names = names
+
+    def get(self, driveId: str, fields: str = "") -> _Request:
+        if driveId not in self._names:
+            return _Request(lambda: (_ for _ in ()).throw(http_error(404, "notFound")))
+        return _Request(lambda: {"name": self._names[driveId]})
+
+
 class FakeDrive:
     def __init__(
         self,
@@ -82,7 +96,9 @@ class FakeDrive:
         about_error: Exception | None = None,
         incomplete: bool = False,
         contents: dict[str, bytes | Exception] | None = None,
+        drive_names: dict[str, str] | None = None,
     ) -> None:
+        self.drive_names = drive_names or {}
         self.items = {item["id"]: item for item in items}
         self.user_email = user_email
         self.get_errors = get_errors or {}
@@ -99,6 +115,9 @@ class FakeDrive:
 
     def about(self) -> FakeDrive:
         return self
+
+    def drives(self) -> _Drives:
+        return _Drives(self.drive_names)
 
     def get(self, fileId: str | None = None, fields: str = "", **kw: Any) -> _Request:
         if fileId is None:  # about().get()
@@ -135,16 +154,32 @@ class FakeDrive:
         return {k: v for k, v in self.items[file_id].items() if k not in ("parents", "trashed")}
 
     def _list(self, kw: dict[str, Any]) -> dict[str, Any]:
-        match = PARENT_QUERY.fullmatch(kw["q"])
-        assert match, kw["q"]
-        parent = match.group(1)
-        if parent in self.list_errors:
-            raise self.list_errors[parent]
-        children = [
-            {k: v for k, v in item.items() if k not in ("parents", "trashed")}
-            for item in self.items.values()
-            if parent in item.get("parents", []) and not item.get("trashed")
-        ]
+        query = kw["q"]
+        if query == "trashed = false":  # a whole Shared Drive
+            assert kw["corpora"] == "drive", kw
+            drive_id = kw["driveId"]
+            if drive_id in self.list_errors:
+                raise self.list_errors[drive_id]
+            matches = [
+                item
+                for item in self.items.values()
+                if item.get("driveId") == drive_id
+                and not item.get("trashed")
+                and item["id"] != drive_id
+            ]
+        else:
+            match = PARENTS_QUERY.fullmatch(query)
+            assert match, query
+            parents = PARENT_ID.findall(match.group("parents"))
+            for parent in parents:
+                if parent in self.list_errors:
+                    raise self.list_errors[parent]  # Drive rejects the whole query
+            matches = [
+                item
+                for item in self.items.values()
+                if set(item.get("parents", [])) & set(parents) and not item.get("trashed")
+            ]
+        children = [{k: v for k, v in item.items() if k != "trashed"} for item in matches]
         start = int(kw.get("pageToken") or 0)
         end = start + kw["pageSize"]
         response: dict[str, Any] = {"files": children[start:end]}
