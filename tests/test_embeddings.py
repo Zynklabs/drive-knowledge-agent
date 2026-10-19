@@ -87,3 +87,23 @@ def test_factory_unsupported_provider() -> None:
     settings = Settings.model_validate({"embeddings": {"provider": "cohere"}})
     with pytest.raises(ConfigError, match="not supported yet"):
         build_embeddings(settings)
+
+
+class FakeTokenizer:
+    def __init__(self, max_length: int) -> None:
+        self.truncation: dict[str, Any] = {"max_length": max_length, "direction": "left"}
+
+    def enable_truncation(self, max_length: int, direction: str = "right") -> None:
+        self.truncation = {"max_length": max_length, "direction": direction}
+
+
+@pytest.mark.parametrize(("model_limit", "expected"), [(8192, 1024), (512, 512)])
+def test_input_length_is_capped_never_raised(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, model_limit: int, expected: int
+) -> None:
+    tokenizer = FakeTokenizer(model_limit)
+    model = FakeModel()
+    model.model = type("Inner", (), {"tokenizer": tokenizer})()  # type: ignore[attr-defined]
+    monkeypatch.setattr(local, "_load_model", lambda name, cache_dir: model)
+    FastEmbedEmbeddings("nomic-ai/nomic-embed-text-v1.5", cache_dir=tmp_path, max_tokens=1024)
+    assert tokenizer.truncation == {"max_length": expected, "direction": "left"}

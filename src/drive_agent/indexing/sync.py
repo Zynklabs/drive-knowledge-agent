@@ -12,7 +12,7 @@ import hashlib
 import json
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -22,7 +22,7 @@ from langchain_core.indexing import index
 
 from drive_agent.core.config import Settings
 from drive_agent.drive.walker import Progress
-from drive_agent.indexing.loader import FileResult, FolderLoad, load_folder
+from drive_agent.indexing.loader import FileResult, FolderLoad, stream_folder
 from drive_agent.indexing.state import STATE_DB, SQLiteRecordManager
 from drive_agent.vectorstores.base import VectorIndex
 
@@ -68,6 +68,34 @@ def embedding_fingerprint(settings: Settings) -> str:
     return f"{settings.embeddings.provider}:{settings.embeddings.model}{suffix}"
 
 
+def _index_file(
+    chunks: list[Document],
+    records: SQLiteRecordManager,
+    vector_index: VectorIndex,
+    report: SyncReport,
+) -> None:
+    """Embed and save one file's new chunks and drop its stale ones, as soon as it is loaded.
+
+    Saving file by file means a stopped sync keeps its progress and the next run skips what
+    is already indexed. One ``index()`` call per file, in a single batch, because incremental
+    cleanup runs per batch: a file split across batches would have its later chunks deleted
+    and re-embedded on every sync.
+    """
+    result = index(
+        chunks,
+        records,
+        vector_index.store,
+        cleanup="incremental",
+        source_id_key="file_id",
+        key_encoder=chunk_key,
+        batch_size=len(chunks),
+    )
+    report.added += result["num_added"]
+    report.updated += result["num_updated"]
+    report.unchanged += result["num_skipped"]
+    report.deleted += result["num_deleted"]
+
+
 def run_sync(
     service: Any,
     settings: Settings,
@@ -95,26 +123,12 @@ def run_sync(
         records.clear()  # the collection was dropped outside the agent: start over
         report.healed = True
 
-    def documents() -> Iterator[Document]:
-        for folder_id in settings.drive.folder_ids:
-            load = load_folder(service, settings, folder_id, on_file=on_file, on_scan=on_scan)
-            report.folders.append(load)
-            for result in load.files:
-                yield from result.chunks
-
-    result = index(
-        documents(),
-        records,
-        vector_index.store,
-        cleanup="incremental",
-        source_id_key="file_id",
-        key_encoder=chunk_key,
-        batch_size=64,
-    )
-    report.added = result["num_added"]
-    report.updated = result["num_updated"]
-    report.unchanged = result["num_skipped"]
-    report.deleted = result["num_deleted"]
+    for folder_id in settings.drive.folder_ids:
+        load = FolderLoad(folder_id=folder_id)
+        report.folders.append(load)
+        for loaded in stream_folder(service, settings, load, on_file=on_file, on_scan=on_scan):
+            if loaded.chunks:
+                _index_file(loaded.chunks, records, vector_index, report)
 
     if any(load.error for load in report.folders):
         report.prune_skipped = True

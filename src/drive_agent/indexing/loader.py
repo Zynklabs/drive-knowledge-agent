@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -60,6 +60,34 @@ def load_file(fetcher: DriveFetcher, file: DriveFile, ingest: IngestSettings) ->
     return result
 
 
+def stream_folder(
+    service: Any,
+    settings: Settings,
+    load: FolderLoad,
+    *,
+    on_file: Callable[[FileResult], None] | None = None,
+    on_scan: Progress | None = None,
+) -> Iterator[FileResult]:
+    """Yield each file as soon as it is loaded, recording results and errors on ``load``."""
+    walker = DriveWalker(service, settings.drive, on_progress=on_scan)
+    fetcher = DriveFetcher(service, max_bytes=settings.drive.max_file_mb * 1024 * 1024)
+    try:
+        load.root = walker.resolve_root(load.folder_id)
+        for item in walker.walk(load.root):
+            if isinstance(item, SkippedFile):
+                load.skipped.append(item)
+                continue
+            result = load_file(fetcher, item, settings.ingest)
+            load.files.append(result)
+            if on_file is not None:
+                on_file(result)
+            yield result
+    except NotAFolderError as exc:
+        load.error = str(exc)
+    except (HttpError, RefreshError) as exc:
+        load.error = explain(exc, folder_id=load.folder_id)
+
+
 def load_folder(
     service: Any,
     settings: Settings,
@@ -69,20 +97,6 @@ def load_folder(
     on_scan: Progress | None = None,
 ) -> FolderLoad:
     load = FolderLoad(folder_id=folder_id)
-    walker = DriveWalker(service, settings.drive, on_progress=on_scan)
-    fetcher = DriveFetcher(service, max_bytes=settings.drive.max_file_mb * 1024 * 1024)
-    try:
-        load.root = walker.resolve_root(folder_id)
-        for item in walker.walk(load.root):
-            if isinstance(item, SkippedFile):
-                load.skipped.append(item)
-                continue
-            result = load_file(fetcher, item, settings.ingest)
-            load.files.append(result)
-            if on_file is not None:
-                on_file(result)
-    except NotAFolderError as exc:
-        load.error = str(exc)
-    except (HttpError, RefreshError) as exc:
-        load.error = explain(exc, folder_id=folder_id)
+    for _ in stream_folder(service, settings, load, on_file=on_file, on_scan=on_scan):
+        pass
     return load

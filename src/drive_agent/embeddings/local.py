@@ -25,19 +25,47 @@ MODEL_PREFIXES: dict[str, tuple[str, str]] = {
 }
 
 
+MAX_INPUT_TOKENS = 1024
+"""Longest input the model sees. Chunks aim for ~800 tokens, but text that tokenizes badly
+(garbled PDF text, symbols, other scripts) can be several times longer, and a batch is padded to
+its longest input. Attention memory grows with the square of that length, so a model that
+accepts 8192 tokens (nomic) can need tens of GB for one batch. Truncating costs only the tail of
+an oversized chunk, which the next chunk's overlap partly covers."""
+
+
 def _load_model(model_name: str, cache_dir: Path) -> Any:
     from fastembed import TextEmbedding  # deferred: imports onnxruntime
 
     return TextEmbedding(model_name=model_name, cache_dir=str(cache_dir))
 
 
+def _cap_input_tokens(model: Any, max_tokens: int) -> None:
+    """Lower the tokenizer's truncation limit to ``max_tokens`` (never raise it)."""
+    tokenizer = getattr(getattr(model, "model", None), "tokenizer", None)
+    if tokenizer is None:
+        return
+    truncation = tokenizer.truncation or {}
+    if truncation.get("max_length", max_tokens + 1) > max_tokens:
+        tokenizer.enable_truncation(
+            max_length=max_tokens, direction=truncation.get("direction", "right")
+        )
+
+
 class FastEmbedEmbeddings(Embeddings):
     """LangChain ``Embeddings`` over a FastEmbed ``TextEmbedding`` model."""
 
-    def __init__(self, model_name: str, cache_dir: Path, *, batch_size: int = 16) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        cache_dir: Path,
+        *,
+        batch_size: int = 16,
+        max_tokens: int = MAX_INPUT_TOKENS,
+    ) -> None:
         cache_dir.mkdir(parents=True, exist_ok=True)
         self.model_name = model_name
         self._model = _load_model(model_name, cache_dir)
+        _cap_input_tokens(self._model, max_tokens)
         self._batch_size = batch_size
         self._doc_prefix, self._query_prefix = MODEL_PREFIXES.get(model_name, ("", ""))
 

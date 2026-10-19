@@ -74,6 +74,37 @@ def test_first_sync_indexes_everything(env: Env) -> None:
     assert env.records.get_meta("embedding") == "local:nomic-ai/nomic-embed-text-v1.5+bm25"
 
 
+def test_stopped_sync_keeps_saved_progress(env: Env) -> None:
+    # Each file is saved as soon as it is loaded, so a sync stopped part-way keeps what it
+    # indexed and the next run only does the rest.
+
+    class Stop(Exception):
+        pass
+
+    def stop_at_cv(result: Any) -> None:
+        if result.file.id == "cv":
+            raise Stop
+
+    with pytest.raises(Stop):
+        env.sync(on_file=stop_at_cv)
+    assert env.records.list_groups() == ["doc"]
+    assert env.index.count() == 2
+
+    report = env.sync()
+    assert (report.added, report.unchanged) == (2, 2)
+    assert env.index.count() == 4
+
+
+def test_file_larger_than_a_batch_is_not_re_embedded(env: Env) -> None:
+    env.drive.contents["doc"] = "\n\n".join(
+        f"# Section {i}\n\n" + f"Paragraph {i} " * 400 for i in range(80)
+    ).encode()
+    first = env.sync()
+    assert first.added > 64
+    again = env.sync()
+    assert (again.added, again.deleted) == (0, 0)
+
+
 def test_resync_is_a_no_op(env: Env) -> None:
     env.sync()
     report = env.sync()
