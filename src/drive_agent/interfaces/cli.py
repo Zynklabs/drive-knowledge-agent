@@ -599,6 +599,58 @@ def ui(
 
 
 @app.command()
+def admin(
+    ctx: typer.Context,
+    port: Annotated[int, typer.Option(help="Port to serve on.")] = 8600,
+    host: Annotated[
+        str, typer.Option(help="Address to bind; anything beyond localhost needs a password.")
+    ] = "localhost",
+    no_browser: Annotated[
+        bool, typer.Option("--no-browser", help="Don't open a browser tab automatically.")
+    ] = False,
+) -> None:
+    """Launch the admin portal: health, index, sync progress, activity and logs of every bot.
+
+    Run it from the folder that holds .env and bots/ (where the bots run).
+    """
+    if ctx.obj.get("env_file") is not None:
+        err_console.print("[red]The admin portal covers every bot; run it without --bot.[/red]")
+        raise typer.Exit(2)
+    settings = _settings(ctx)
+    if importlib.util.find_spec("streamlit") is None:
+        err_console.print(
+            "[red]Streamlit is not installed.[/red] pip install 'drive-knowledge-agent[streamlit]'"
+        )
+        raise typer.Exit(1)
+    secrets = settings.secrets
+    if host not in {"localhost", "127.0.0.1"} and not (
+        secrets.admin_password or secrets.ui_password
+    ):
+        err_console.print(
+            "[red]Refusing to serve the admin portal beyond localhost without a password.[/red] "
+            "Set ADMIN_PASSWORD (it shows logs and usage)."
+        )
+        raise typer.Exit(2)
+
+    from drive_agent.interfaces import admin as admin_portal
+
+    app_path = Path(admin_portal.__file__).with_name("app.py")
+    env = dict(os.environ)
+    env.pop(EXTRA_ENV_VAR, None)
+    if ctx.obj["config"] is not None:
+        env[CONFIG_ENV_VAR] = str(Path(ctx.obj["config"]).resolve())
+    command = [
+        sys.executable, "-m", "streamlit", "run", str(app_path),
+        "--server.port", str(port),
+        "--server.address", host,
+        "--browser.gatherUsageStats", "false",
+        "--server.headless", "true" if no_browser else "false",
+        "--client.toolbarMode", "minimal",
+    ]  # fmt: skip
+    raise typer.Exit(subprocess.call(command, env=env))  # noqa: S603 - fixed argv, no shell
+
+
+@app.command()
 def slack(ctx: typer.Context) -> None:
     """Run the Slack bot (Socket Mode by default: no public URL needed).
 

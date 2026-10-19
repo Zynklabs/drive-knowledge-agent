@@ -21,6 +21,7 @@ from langchain_core.documents import Document
 from langchain_core.indexing import index
 
 from drive_agent.core.config import Settings
+from drive_agent.core.monitor import SyncProgress
 from drive_agent.drive.walker import Progress
 from drive_agent.indexing.loader import FileResult, FolderLoad, stream_folder
 from drive_agent.indexing.state import STATE_DB, SQLiteRecordManager
@@ -106,6 +107,32 @@ def run_sync(
     on_file: Callable[[FileResult], None] | None = None,
     on_scan: Progress | None = None,
 ) -> SyncReport:
+    progress = SyncProgress(settings.data_dir, full=full)  # read by the admin portal
+    try:
+        report = _run_sync(
+            service, settings, vector_index, records, progress, full, on_file, on_scan
+        )
+    except Exception as exc:
+        progress.finish(ok=False, error=str(exc) or type(exc).__name__)
+        raise
+    except BaseException:  # Ctrl+C or a service stop: progress is saved, so say so plainly
+        progress.finish(ok=False, error="stopped")
+        raise
+    folder_errors = [load.error for load in report.folders if load.error]
+    progress.finish(ok=not folder_errors, error="; ".join(folder_errors) or None)
+    return report
+
+
+def _run_sync(
+    service: Any,
+    settings: Settings,
+    vector_index: VectorIndex,
+    records: SQLiteRecordManager,
+    progress: SyncProgress,
+    full: bool,
+    on_file: Callable[[FileResult], None] | None,
+    on_scan: Progress | None,
+) -> SyncReport:
     started = time.monotonic()
     report = SyncReport()
     fingerprint = embedding_fingerprint(settings)
@@ -127,8 +154,12 @@ def run_sync(
         load = FolderLoad(folder_id=folder_id)
         report.folders.append(load)
         for loaded in stream_folder(service, settings, load, on_file=on_file, on_scan=on_scan):
+            added_before = report.added
             if loaded.chunks:
                 _index_file(loaded.chunks, records, vector_index, report)
+            progress.file_done(
+                failed=loaded.error is not None, chunks_added=report.added - added_before
+            )
 
     if any(load.error for load in report.folders):
         report.prune_skipped = True

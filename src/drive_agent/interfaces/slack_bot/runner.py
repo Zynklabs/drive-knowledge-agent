@@ -7,6 +7,7 @@ from typing import Any
 
 from drive_agent.core.config import ConfigError, Settings
 from drive_agent.core.knowledge_base import KnowledgeBase
+from drive_agent.core.monitor import Heartbeat, record_activity
 from drive_agent.drive.auth import DriveAuthError
 from drive_agent.indexing.scheduler import SyncBusy
 from drive_agent.indexing.sync import SyncError, summarize
@@ -65,6 +66,7 @@ def make_bot(kb: KnowledgeBase) -> SlackBot:
         status=lambda: status_text(kb),
         sync=sync,
         feedback_path=kb.settings.data_dir / FEEDBACK_FILE,
+        activity=lambda event: record_activity(kb.settings.data_dir, event),
     )
 
 
@@ -78,12 +80,21 @@ def run(kb: KnowledgeBase) -> None:
         token=tokens["SLACK_BOT_TOKEN"], signing_secret=tokens.get("SLACK_SIGNING_SECRET")
     )
     register(app, make_bot(kb))
-    if slack.mode == "socket":
-        from slack_bolt.adapter.socket_mode import SocketModeHandler
+    # Read by the admin portal; the schedule is the effective one (env can override the file).
+    heartbeat = Heartbeat(
+        kb.settings.data_dir,
+        "slack",
+        details={"schedule": kb.settings.ingest.schedule_cron if kb.auto_sync else None},
+    ).start()
+    try:
+        if slack.mode == "socket":
+            from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-        SocketModeHandler(app, tokens["SLACK_APP_TOKEN"]).start()
-    else:
-        app.start(port=slack.http_port)
+            SocketModeHandler(app, tokens["SLACK_APP_TOKEN"]).start()
+        else:
+            app.start(port=slack.http_port)
+    finally:
+        heartbeat.stop()
 
 
 __all__ = ["make_bot", "required_tokens", "run", "status_text"]

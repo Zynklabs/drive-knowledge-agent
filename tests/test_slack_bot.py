@@ -440,3 +440,42 @@ def test_cli_slack_starts_bot(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "index is empty" in result.output
     assert "Auto-sync: off" in result.output  # tests run with SYNC_SCHEDULE=off
     assert len(started) == 1
+
+
+# --- activity log (admin portal) -------------------------------------------------
+
+
+def activity_bot(
+    tmp_path: Path, events: list[dict[str, Any]], agent: Any = None, **slack: Any
+) -> SlackBot:
+    return SlackBot(
+        agent or FakeAgent(),
+        SlackSettings(**slack),
+        status=lambda: "",
+        sync=lambda: "",
+        feedback_path=tmp_path / "feedback.jsonl",
+        activity=events.append,
+    )
+
+
+def test_questions_are_recorded_without_their_text(tmp_path: Path) -> None:
+    events: list[dict[str, Any]] = []
+    activity_bot(tmp_path, events).handle_mention(mention(), FakeClient())
+    (event,) = events
+    assert event["outcome"] == "answered"
+    assert (event["via"], event["user"], event["channel"]) == ("mention", "U1", "C1")
+    assert "question" not in event
+    assert event["seconds"] >= 0
+
+
+def test_question_text_is_opt_in(tmp_path: Path) -> None:
+    events: list[dict[str, Any]] = []
+    activity_bot(tmp_path, events, log_questions=True).handle_mention(mention(), FakeClient())
+    assert events[0]["question"] == "who knows Go?"
+
+
+def test_failed_answers_are_recorded(tmp_path: Path) -> None:
+    events: list[dict[str, Any]] = []
+    bot = activity_bot(tmp_path, events, FakeAgent(error=RuntimeError("boom")))
+    bot.handle_mention(mention(), FakeClient())
+    assert (events[0]["outcome"], events[0]["error"]) == ("error", "RuntimeError")

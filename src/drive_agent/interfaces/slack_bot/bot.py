@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from drive_agent.core.agent import DriveAgent
+from drive_agent.core.agent import AgentReply, DriveAgent
 from drive_agent.core.config import ConfigError, SlackSettings
 from drive_agent.interfaces.slack_bot.formatting import (
     FEEDBACK_DOWN,
@@ -62,6 +62,7 @@ class SlackBot:
         status: Callable[[], str],
         sync: Callable[[], str],
         feedback_path: Path,
+        activity: Callable[[dict[str, Any]], None] | None = None,
         update_interval: float = 1.5,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -70,6 +71,7 @@ class SlackBot:
         self._status = status
         self._sync = sync
         self._feedback_path = feedback_path
+        self._activity = activity
         self._interval = update_interval
         self._clock = clock
         self._seen: OrderedDict[str, None] = OrderedDict()
@@ -115,7 +117,9 @@ class SlackBot:
                 channel=channel, thread_ts=thread_ts, text=help_text(self.command)
             )
             return
-        self.answer_in_thread(client, channel, thread_ts, question)
+        self.answer_in_thread(
+            client, channel, thread_ts, question, user=event.get("user"), via="mention"
+        )
 
     def handle_dm(self, event: dict[str, Any], client: Any) -> None:
         # Ignore other bots (and ourselves), edits, joins and other message subtypes.
@@ -130,9 +134,48 @@ class SlackBot:
             return
         question = event.get("text", "").strip()
         if question:
-            self.answer_in_thread(client, channel, thread_ts, question)
+            self.answer_in_thread(
+                client, channel, thread_ts, question, user=event.get("user"), via="dm"
+            )
 
-    def answer_in_thread(self, client: Any, channel: str, thread_ts: str, question: str) -> None:
+    def _ask(
+        self,
+        question: str,
+        thread_id: str,
+        *,
+        via: str,
+        user: str | None,
+        channel: str | None,
+        on_text: Callable[[str], None] | None = None,
+    ) -> AgentReply:
+        """Ask the agent and record the outcome for the admin portal (never the answer)."""
+        started = time.monotonic()
+        event: dict[str, Any] = {"kind": "question", "via": via, "user": user, "channel": channel}
+        if self._settings.log_questions:
+            event["question"] = question
+        try:
+            reply = self._agent.ask(question, thread_id=thread_id, on_text=on_text)
+        except Exception as exc:
+            event.update(outcome="error", error=type(exc).__name__)
+            raise
+        else:
+            event.update(outcome=reply.status, sources=len(reply.citations))
+            return reply
+        finally:
+            event["seconds"] = round(time.monotonic() - started, 1)
+            if self._activity is not None:
+                self._activity(event)
+
+    def answer_in_thread(
+        self,
+        client: Any,
+        channel: str,
+        thread_ts: str,
+        question: str,
+        *,
+        user: str | None = None,
+        via: str = "mention",
+    ) -> None:
         placeholder = client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=SEARCHING)
         ts = placeholder["ts"]
         streamed: list[str] = []
@@ -149,7 +192,9 @@ class SlackBot:
 
         thread_id = f"slack:{channel}:{thread_ts}"
         try:
-            reply = self._agent.ask(question, thread_id=thread_id, on_text=on_text)
+            reply = self._ask(
+                question, thread_id, via=via, user=user, channel=channel, on_text=on_text
+            )
         except (LLMError, ConfigError) as exc:
             client.chat_update(channel=channel, ts=ts, text=f":warning: {exc}")
             return
@@ -202,7 +247,13 @@ class SlackBot:
         # Slash commands are one-off: a fresh thread per question, so no memory between them.
         thread_id = f"slack-cmd:{command.get('user_id', 'unknown')}:{uuid.uuid4().hex[:8]}"
         try:
-            reply = self._agent.ask(question, thread_id=thread_id)
+            reply = self._ask(
+                question,
+                thread_id,
+                via="command",
+                user=command.get("user_id"),
+                channel=command.get("channel_id"),
+            )
         except (LLMError, ConfigError) as exc:
             respond(text=f":warning: {exc}", response_type="ephemeral")
             return

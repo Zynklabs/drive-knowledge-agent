@@ -80,6 +80,8 @@ ENV_ALIASES: dict[str, str] = {
     "SLACK_ALLOWED_CHANNELS": "interfaces.slack.allowed_channels",
     "SLACK_ADMIN_USERS": "interfaces.slack.admin_users",
     "SLACK_COMMAND": "interfaces.slack.command",
+    "SLACK_LOG_QUESTIONS": "interfaces.slack.log_questions",
+    "LOG_DIR": "admin.log_dir",
 }
 
 DEFAULT_FILE_KINDS: tuple[FileKind, ...] = ("docs", "slides", "pdf", "docx", "pptx", "txt", "md")
@@ -253,12 +255,20 @@ class SlackSettings(_Section):
     """Slack user IDs allowed to run `/drive-agent sync`; empty = nobody."""
     command: str = Field(default="/drive-agent", pattern=r"^/[a-z0-9_-]{1,31}$")
     """Slash command; give each bot in a workspace its own (e.g. /drive-hr)."""
+    log_questions: bool = False
+    """Include question text in the activity log the admin portal shows (off: metadata only)."""
 
     _split_lists = field_validator("allowed_channels", "admin_users", mode="before")(_split_csv)
 
 
 class InterfacesSettings(_Section):
     slack: SlackSettings = Field(default_factory=SlackSettings)
+
+
+class AdminSettings(_Section):
+    log_dir: Path | None = None
+    """Folder of log files the admin portal can show (e.g. where your service manager writes
+    each bot's output). Unset: the portal shows status and activity only."""
 
 
 class Secrets(BaseModel):
@@ -283,6 +293,8 @@ class Secrets(BaseModel):
     langfuse_secret_key: SecretStr | None = None
     ui_password: SecretStr | None = None
     """Protects the Streamlit app when set (env UI_PASSWORD)."""
+    admin_password: SecretStr | None = None
+    """Protects the admin portal (env ADMIN_PASSWORD); falls back to UI_PASSWORD."""
 
     @field_validator("*", mode="before")
     @classmethod
@@ -312,6 +324,7 @@ class Settings(_Section):
     agent: AgentSettings = Field(default_factory=AgentSettings)
     tracing: TracingSettings = Field(default_factory=TracingSettings)
     interfaces: InterfacesSettings = Field(default_factory=InterfacesSettings)
+    admin: AdminSettings = Field(default_factory=AdminSettings)
     secrets: Secrets = Field(default_factory=Secrets, exclude=True)
     source_file: Path | None = Field(default=None, exclude=True)
     extra_env_file: Path | None = Field(default=None, exclude=True)

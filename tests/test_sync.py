@@ -6,6 +6,7 @@ import pytest
 from langchain_core.embeddings import DeterministicFakeEmbedding
 
 from drive_agent.core.config import Settings
+from drive_agent.core.monitor import SYNC_PROGRESS_FILE, read_json
 from drive_agent.drive.fetcher import DriveFetcher
 from drive_agent.indexing.state import SQLiteRecordManager
 from drive_agent.indexing.sync import SyncError, run_sync
@@ -103,6 +104,24 @@ def test_file_larger_than_a_batch_is_not_re_embedded(env: Env) -> None:
     assert first.added > 64
     again = env.sync()
     assert (again.added, again.deleted) == (0, 0)
+
+
+def test_sync_progress_is_recorded(env: Env) -> None:
+    env.sync()
+    progress = read_json(env.settings.data_dir / SYNC_PROGRESS_FILE)
+    assert progress is not None
+    assert (progress["state"], progress["files_done"], progress["chunks_added"]) == ("done", 2, 4)
+
+
+def test_interrupted_sync_is_recorded_as_failed(env: Env) -> None:
+    def interrupt(result: Any) -> None:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        env.sync(on_file=interrupt)
+    progress = read_json(env.settings.data_dir / SYNC_PROGRESS_FILE)
+    assert progress is not None
+    assert (progress["state"], progress["error"]) == ("failed", "stopped")
 
 
 def test_resync_is_a_no_op(env: Env) -> None:
