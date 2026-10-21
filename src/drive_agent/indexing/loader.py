@@ -67,16 +67,26 @@ def stream_folder(
     *,
     on_file: Callable[[FileResult], None] | None = None,
     on_scan: Progress | None = None,
+    on_listed: Callable[[int], None] | None = None,
 ) -> Iterator[FileResult]:
-    """Yield each file as soon as it is loaded, recording results and errors on ``load``."""
+    """Yield each file as soon as it is loaded, recording results and errors on ``load``.
+
+    The whole tree is listed before any download (listing is fast; downloads are not), so
+    ``on_listed`` gets the number of files to load up front and progress can show "n of N".
+    """
     walker = DriveWalker(service, settings.drive, on_progress=on_scan)
     fetcher = DriveFetcher(service, max_bytes=settings.drive.max_file_mb * 1024 * 1024)
     try:
         load.root = walker.resolve_root(load.folder_id)
+        files: list[DriveFile] = []
         for item in walker.walk(load.root):
             if isinstance(item, SkippedFile):
                 load.skipped.append(item)
-                continue
+            else:
+                files.append(item)
+        if on_listed is not None:
+            on_listed(len(files))
+        for item in files:
             result = load_file(fetcher, item, settings.ingest)
             load.files.append(result)
             if on_file is not None:

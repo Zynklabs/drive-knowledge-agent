@@ -91,17 +91,36 @@ def render_bot(bot: BotOverview) -> None:
         details.append(f"`{settings.interfaces.slack.command}`")
         st.markdown(" · ".join(details))
 
+        index, total = bot.index, bot.total_files
         a, b, c, d = st.columns(4)
-        a.metric("Chunks indexed", f"{bot.index.chunks:,}")
-        b.metric("Files (last sync)", f"{bot.index.files:,}")
+        a.metric(
+            "Files in folder",
+            f"{total:,}" if total is not None else "-",
+            help="Supported files found in the Drive folder (known once a sync has listed it).",
+        )
+        b.metric(
+            "Files synced",
+            f"{index.synced_files:,}",
+            help="Files whose text is in the index now. Updates live while a sync runs.",
+        )
         c.metric("Questions, 24 h", bot.last_24h.questions)
         stats = bot.last_24h
         rate = f"{stats.not_found / stats.questions:.0%}" if stats.questions else "-"
         d.metric("Not found, 24 h", rate)
+        if total:
+            share = min(index.synced_files / total, 1.0)
+            st.progress(share, text=f"{share:.0%} of files synced")
 
-        sync_line = f"Last sync: {when(bot.index.last_sync)}"
-        if bot.index.failed:
-            sync_line += f" · {bot.index.failed} files failed"
+        details = [f"{index.chunks:,} chunks"]
+        if index.failed:
+            details.append(f"{index.failed} failed")
+        if index.empty:
+            details.append(f"{index.empty} with no readable text")
+        if index.skipped:
+            details.append(f"{index.skipped} skipped by type or size")
+        st.caption(" · ".join(details))
+
+        sync_line = f"Last sync: {when(index.last_sync)}"
         sync_line += (
             f" · auto-sync `{bot.schedule}` UTC, next {when(bot.next_sync)}"
             if bot.schedule
@@ -121,7 +140,14 @@ def render_sync(sync: dict[str, Any] | None) -> None:
     if not sync:
         return
     state = sync.get("state")
-    counts = f"{sync.get('files_done', 0):,} files · {sync.get('chunks_added', 0):,} new chunks" + (
+    done, total = sync.get("files_done", 0), sync.get("files_total")
+    if isinstance(total, int):
+        processed = f"{done:,} of {total:,} files checked"
+    elif state == "running" and done == 0:
+        processed = "listing the folder"
+    else:
+        processed = f"{done:,} files checked"
+    counts = f"{processed} · {sync.get('chunks_added', 0):,} new chunks" + (
         f" · {sync['files_failed']} failed" if sync.get("files_failed") else ""
     )
     if state == "running":

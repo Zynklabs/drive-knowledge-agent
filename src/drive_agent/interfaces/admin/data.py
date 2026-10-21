@@ -37,9 +37,15 @@ Health = Literal["running", "not responding", "stopped", "never started"]
 @dataclass
 class IndexState:
     chunks: int = 0
-    files: int = 0
-    """Files with at least one chunk, as of the last finished sync."""
+    synced_files: int = 0
+    """Files with at least one chunk in the index right now (grows while a sync runs)."""
+    total_files: int | None = None
+    """Files found in the folder at the last finished sync (None: not recorded yet)."""
     failed: int = 0
+    empty: int = 0
+    """Files with no readable text (e.g. scanned PDFs) at the last finished sync."""
+    skipped: int = 0
+    """Files left out by type or size (spreadsheets, images, too large)."""
     last_sync: datetime | None = None
 
 
@@ -71,6 +77,13 @@ class BotOverview:
     @property
     def syncing(self) -> bool:
         return bool(self.sync and self.sync.get("state") == "running")
+
+    @property
+    def total_files(self) -> int | None:
+        """Files in the folder: the running sync's listing, else the last finished sync's."""
+        if self.syncing and self.sync and isinstance(self.sync.get("files_total"), int):
+            return int(self.sync["files_total"])
+        return self.index.total_files
 
 
 def bot_names(bots_dir: Path = BOTS_DIR) -> list[str]:
@@ -115,9 +128,10 @@ def read_index_state(settings: Settings) -> IndexState:
     except sqlite3.Error:
         return IndexState()
     try:
-        chunks = conn.execute(
-            "SELECT COUNT(*) FROM upsertion_record WHERE namespace = ?", [namespace]
-        ).fetchone()[0]
+        chunks, synced = conn.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT group_id) FROM upsertion_record WHERE namespace = ?",
+            [namespace],
+        ).fetchone()
         row = conn.execute(
             "SELECT value FROM meta WHERE namespace = ? AND name = 'last_sync'", [namespace]
         ).fetchone()
@@ -126,10 +140,14 @@ def read_index_state(settings: Settings) -> IndexState:
     finally:
         conn.close()
     meta = json.loads(row[0]) if row else {}
+    total = meta.get("total_files")
     return IndexState(
         chunks=int(chunks),
-        files=int(meta.get("files", 0)),
+        synced_files=int(synced),
+        total_files=int(total) if isinstance(total, int) else None,
         failed=int(meta.get("failed", 0)),
+        empty=int(meta.get("empty", 0)),
+        skipped=int(meta.get("skipped", 0)),
         last_sync=parse_time(meta.get("at")),
     )
 

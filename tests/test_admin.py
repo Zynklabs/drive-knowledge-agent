@@ -126,15 +126,22 @@ def test_overview_reads_every_file(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     settings = load_settings(extra_env_file=Path("bots/hr.env"))
     records = SQLiteRecordManager(namespace_for(settings), data_dir / STATE_DB)
     records.update(["k1", "k2", "k3"], group_ids=["f1", "f1", "f2"])
-    records.set_meta("last_sync", {"at": iso(NOW - timedelta(hours=1)), "files": 2, "failed": 1})
+    records.set_meta(
+        "last_sync",
+        {"at": iso(NOW - timedelta(hours=1)), "failed": 1, "total_files": 4, "empty": 1},
+    )
     records.close()
     (data_dir / HEARTBEAT_FILE).write_text(json.dumps({"updated_at": iso(NOW)}))
-    SyncProgress(data_dir).file_done(failed=False, chunks_added=3)
+    progress = SyncProgress(data_dir)
+    progress.listed(5)
+    progress.file_done(failed=False, chunks_added=3)
     record_activity(data_dir, {"kind": "question", "outcome": "answered", "user": "U1"})
 
     bot = overview("hr", now=datetime.now(UTC))
     assert bot.config_error is None
-    assert (bot.index.chunks, bot.index.files, bot.index.failed) == (3, 2, 1)
+    assert (bot.index.chunks, bot.index.synced_files) == (3, 2)
+    assert (bot.index.total_files, bot.index.failed, bot.index.empty) == (4, 1, 1)
+    assert bot.total_files == 5  # the running sync's listing wins over the last sync's
     assert bot.syncing
     assert bot.sync is not None
     assert bot.sync["chunks_added"] == 3
@@ -151,6 +158,18 @@ def test_running_bot_reports_its_effective_schedule(
     assert overview("hr").schedule is None
     Heartbeat(data_dir, "slack", details={"schedule": None}).stop()  # not running: show config
     assert overview("hr").schedule == "0 */6 * * *"
+
+
+def test_bots_page_shows_files_synced_of_total(tmp_path: Path) -> None:
+    data_dir = make_bot_env(tmp_path, "hr")
+    settings = load_settings(extra_env_file=Path("bots/hr.env"))
+    records = SQLiteRecordManager(namespace_for(settings), data_dir / STATE_DB)
+    records.update(["k1", "k2", "k3"], group_ids=["f1", "f1", "f2"])
+    records.set_meta("last_sync", {"at": iso(NOW), "total_files": 8})
+    records.close()
+    at = AppTest.from_file(APP, default_timeout=30).run()
+    assert [m.value for m in at.metric][:2] == ["8", "2"]
+    assert at.get("progress")[0].proto.text == "25% of files synced"
 
 
 def test_overview_of_a_bot_that_never_ran(tmp_path: Path) -> None:
@@ -231,7 +250,7 @@ def test_bots_page() -> None:
     at = AppTest.from_file(APP, default_timeout=30).run()
     assert not at.exception
     assert [s.value for s in at.subheader] == ["⚪ hr"]
-    assert [m.value for m in at.metric] == ["0", "0", "1", "100%"]
+    assert [m.value for m in at.metric] == ["-", "0", "1", "100%"]
 
 
 @pytest.mark.usefixtures("portal_files")

@@ -27,6 +27,9 @@ from drive_agent.indexing.loader import FileResult, FolderLoad, stream_folder
 from drive_agent.indexing.state import STATE_DB, SQLiteRecordManager
 from drive_agent.vectorstores.base import VectorIndex
 
+UPSERT_BATCH = 64
+"""Chunks per vector-store write: well under request size limits even with long chunks."""
+
 
 class SyncError(Exception):
     """The sync cannot run safely with the current configuration."""
@@ -78,23 +81,34 @@ def _index_file(
     """Embed and save one file's new chunks and drop its stale ones, as soon as it is loaded.
 
     Saving file by file means a stopped sync keeps its progress and the next run skips what
-    is already indexed. One ``index()`` call per file, in a single batch, because incremental
-    cleanup runs per batch: a file split across batches would have its later chunks deleted
-    and re-embedded on every sync.
+    is already indexed. Chunks are written in batches of ``UPSERT_BATCH``, so one huge file
+    stays under the vector store's request size limit (Qdrant: 32 MB). The file's stale
+    chunks are removed here, once all its new ones are saved, rather than by ``index()``'s
+    incremental cleanup: that runs per batch and would delete, then re-embed, the later
+    chunks of any file spanning several batches.
     """
     result = index(
         chunks,
         records,
         vector_index.store,
-        cleanup="incremental",
+        cleanup=None,
         source_id_key="file_id",
         key_encoder=chunk_key,
-        batch_size=len(chunks),
+        batch_size=UPSERT_BATCH,
     )
+    current = {chunk_key(chunk) for chunk in chunks}
+    stale = [
+        key
+        for key in records.list_keys(group_ids=[chunks[0].metadata["file_id"]])
+        if key not in current
+    ]
+    if stale:
+        vector_index.store.delete(ids=stale)
+        records.delete_keys(stale)
     report.added += result["num_added"]
     report.updated += result["num_updated"]
     report.unchanged += result["num_skipped"]
-    report.deleted += result["num_deleted"]
+    report.deleted += len(stale)
 
 
 def run_sync(
@@ -153,12 +167,16 @@ def _run_sync(
     for folder_id in settings.drive.folder_ids:
         load = FolderLoad(folder_id=folder_id)
         report.folders.append(load)
-        for loaded in stream_folder(service, settings, load, on_file=on_file, on_scan=on_scan):
+        for loaded in stream_folder(
+            service, settings, load, on_file=on_file, on_scan=on_scan, on_listed=progress.listed
+        ):
             added_before = report.added
             if loaded.chunks:
                 _index_file(loaded.chunks, records, vector_index, report)
             progress.file_done(
-                failed=loaded.error is not None, chunks_added=report.added - added_before
+                failed=loaded.error is not None,
+                empty=loaded.error is None and not loaded.chunks,
+                chunks_added=report.added - added_before,
             )
 
     if any(load.error for load in report.folders):
@@ -183,6 +201,9 @@ def _run_sync(
             "files": len({r.file.id for r in report.files if r.chunks}),
             "chunks": records.count(),
             "failed": sum(1 for r in report.files if r.error),
+            "total_files": len(report.files),
+            "empty": sum(1 for r in report.files if not r.error and not r.chunks),
+            "skipped": sum(len(load.skipped) for load in report.folders),
         },
     )
     return report

@@ -123,15 +123,23 @@ class SyncProgress:
             "pid": os.getpid(),
             "full": full,
             "started_at": now_iso(),
+            "files_total": None,
             "files_done": 0,
             "files_failed": 0,
+            "files_empty": 0,
             "chunks_added": 0,
         }
         self._save()
 
-    def file_done(self, *, failed: bool, chunks_added: int) -> None:
+    def listed(self, files: int) -> None:
+        """A folder was listed: ``files`` more to load."""
+        self.state["files_total"] = (self.state["files_total"] or 0) + files
+        self._save()
+
+    def file_done(self, *, failed: bool, chunks_added: int, empty: bool = False) -> None:
         self.state["files_done"] += 1
         self.state["files_failed"] += int(failed)
+        self.state["files_empty"] += int(empty)
         self.state["chunks_added"] += chunks_added
         self._save()
 

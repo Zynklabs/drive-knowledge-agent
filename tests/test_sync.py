@@ -8,6 +8,7 @@ from langchain_core.embeddings import DeterministicFakeEmbedding
 from drive_agent.core.config import Settings
 from drive_agent.core.monitor import SYNC_PROGRESS_FILE, read_json
 from drive_agent.drive.fetcher import DriveFetcher
+from drive_agent.indexing import sync as sync_module
 from drive_agent.indexing.state import SQLiteRecordManager
 from drive_agent.indexing.sync import SyncError, run_sync
 from drive_agent.vectorstores import VectorIndex, build_vector_index
@@ -111,6 +112,9 @@ def test_sync_progress_is_recorded(env: Env) -> None:
     progress = read_json(env.settings.data_dir / SYNC_PROGRESS_FILE)
     assert progress is not None
     assert (progress["state"], progress["files_done"], progress["chunks_added"]) == ("done", 2, 4)
+    assert progress["files_total"] == 2
+    last = env.records.get_meta("last_sync")
+    assert (last["total_files"], last["empty"], last["skipped"]) == (2, 0, 0)
 
 
 def test_interrupted_sync_is_recorded_as_failed(env: Env) -> None:
@@ -122,6 +126,26 @@ def test_interrupted_sync_is_recorded_as_failed(env: Env) -> None:
     progress = read_json(env.settings.data_dir / SYNC_PROGRESS_FILE)
     assert progress is not None
     assert (progress["state"], progress["error"]) == ("failed", "stopped")
+
+
+def test_huge_file_is_written_in_capped_batches(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    # One request for a whole huge file once exceeded Qdrant's 32 MB request limit.
+    env.drive.contents["doc"] = "\n\n".join(
+        f"# Section {i}\n\n" + f"Paragraph {i} " * 400 for i in range(200)
+    ).encode()
+    store = env.index.store
+    writes: list[int] = []
+    original = store.add_documents
+
+    def spy(docs: list[Any], **kwargs: Any) -> list[str]:
+        writes.append(len(docs))
+        return original(docs, **kwargs)
+
+    monkeypatch.setattr(store, "add_documents", spy)
+    report = env.sync()
+    assert report.added > 2 * sync_module.UPSERT_BATCH
+    assert max(writes) <= sync_module.UPSERT_BATCH
+    assert env.records.count() == report.added
 
 
 def test_resync_is_a_no_op(env: Env) -> None:
