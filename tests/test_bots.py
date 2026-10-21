@@ -187,9 +187,9 @@ def test_slash_command_is_per_bot(tmp_path: Path) -> None:
     )
     assert bot.command == "/drive-hr"
     calls: list[dict[str, Any]] = []
-    bot.handle_command({"text": "help"}, lambda **kw: calls.append(kw))
+    bot.handle_command({"text": "help"}, lambda **kw: calls.append(kw), None)
     assert "`/drive-hr status`" in calls[0]["text"]
-    bot.handle_command({"text": "ask"}, lambda **kw: calls.append(kw))
+    bot.handle_command({"text": "ask"}, lambda **kw: calls.append(kw), None)
     assert calls[-1]["text"] == "Usage: `/drive-hr ask <question>`"
 
     from urllib.parse import urlencode
@@ -209,7 +209,7 @@ def test_slash_command_is_per_bot(tmp_path: Path) -> None:
         ),
     )
     seen: list[str] = []
-    bot.handle_command = lambda command, respond: seen.append(command["command"])  # type: ignore[method-assign]
+    bot.handle_command = lambda command, respond, client: seen.append(command["command"])  # type: ignore[method-assign]
     register(bolt, bot)
     for name in ("/drive-hr", "/drive-agent"):
         body = urlencode(

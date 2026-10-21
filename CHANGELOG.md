@@ -6,7 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+- Slack access follows channel membership. Direct messages are now **off by default** (`SLACK_ALLOW_DMS=true` turns them on): before, anyone in the workspace could DM a bot and query its whole folder. Slash-command questions are answered only in channels the bot has been added to (and in DMs when they are on); before, `/drive-agent <question>` worked from any channel or DM.
+
+### Fixed
+- A sync no longer crashes on a very large file: chunks are written 64 at a time, under Qdrant's 32 MB request limit. Before, one huge file crashed the sync and every restart crashed on it again.
+
 ### Added
+- Admin portal (`drive-agent admin`, localhost:8600): each bot's health, files in the folder vs files synced, live sync progress, 24-hour question stats, an activity log (question text only with `SLACK_LOG_QUESTIONS=true`) and live service logs (`LOG_DIR`).
+- Syncs save to the index file by file, so a stopped sync resumes where it left off. Local embedding inputs are capped at 1,024 tokens, which keeps memory bounded on badly-tokenizing text.
 - Faster Drive walking with identical results:
   - A whole Shared Drive is listed flat in a few requests. On a 692-folder, 3,386-item drive the check went from about 7 min to 17 s.
   - Other trees list each folder with its own query, 8 in parallel: 250 folders went from 144 s to 23 s.

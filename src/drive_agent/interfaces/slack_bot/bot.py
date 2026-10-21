@@ -38,12 +38,20 @@ log = logging.getLogger(__name__)
 SEARCHING = ":mag: Searching your Drive…"
 
 
-def help_text(command: str = "/drive-agent") -> str:
+NOT_IN_CHANNEL = (
+    "I only answer in channels I've been added to. Add me first (`/invite @` and my name), "
+    "then ask again."
+)
+DMS_OFF = "Direct messages are turned off. Ask me in a channel I've been added to."
+
+
+def help_text(command: str = "/drive-agent", *, allow_dms: bool = False) -> str:
+    where = "in a channel I've been added to" + (" or in a DM" if allow_dms else "")
     return (
         "*Drive Knowledge Agent*\n"
-        "• Mention me in a channel or send me a DM with a question; I answer in the thread "
+        f"• Mention me {where} with a question; I answer in the thread "
         "and remember the thread's conversation (mention me again for follow-ups).\n"
-        f"• `{command} <question>` or `{command} ask <question>`: a private answer.\n"
+        f"• `{command} <question>` or `{command} ask <question>` {where}: a private answer.\n"
         f"• `{command} status`: what is indexed.\n"
         f"• `{command} sync`: re-index the Drive folders (admins only)."
     )
@@ -95,6 +103,34 @@ class SlackBot:
                 self._seen.popitem(last=False)
         return False
 
+    def _help(self) -> str:
+        return help_text(self.command, allow_dms=self._settings.allow_dms)
+
+    def _command_allowed(self, command: dict[str, Any], client: Any) -> str | None:
+        """Why a slash-command question can't be answered here, or None if it can.
+
+        Slash commands work anywhere in the workspace, so without this check anyone could
+        query the folder from any channel or DM. Answer only where mentions are answered:
+        channels the bot was added to (and allowed), or DMs when they are turned on. Slack
+        refuses an ephemeral post in a channel the bot is not in, which proves membership
+        with the scopes the bot already has; that post doubles as the "searching" notice.
+        """
+        channel = command.get("channel_id") or ""
+        if channel.startswith("D") or command.get("channel_name") == "directmessage":
+            return None if self._settings.allow_dms else DMS_OFF
+        if not channel or not self._allowed_channel(channel):
+            return "I'm not enabled in this channel."
+        try:
+            client.chat_postEphemeral(channel=channel, user=command.get("user_id"), text=SEARCHING)
+        except Exception as exc:
+            response = getattr(exc, "response", None)
+            error = response.get("error") if response is not None else None
+            if error in {"not_in_channel", "channel_not_found"}:
+                return NOT_IN_CHANNEL
+            log.exception("checking channel membership failed")
+            return ":warning: I couldn't check this channel; see the bot's logs."
+        return None
+
     def _allowed_channel(self, channel: str) -> bool:
         allowed = self._settings.allowed_channels
         return not allowed or channel in allowed
@@ -113,9 +149,7 @@ class SlackBot:
             return
         question = strip_mentions(event.get("text", ""))
         if not question:
-            client.chat_postMessage(
-                channel=channel, thread_ts=thread_ts, text=help_text(self.command)
-            )
+            client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=self._help())
             return
         self.answer_in_thread(
             client, channel, thread_ts, question, user=event.get("user"), via="mention"
@@ -128,9 +162,7 @@ class SlackBot:
         channel = event["channel"]
         thread_ts = event.get("thread_ts") or event["ts"]
         if not self._settings.allow_dms:
-            client.chat_postMessage(
-                channel=channel, thread_ts=thread_ts, text="Direct messages are turned off."
-            )
+            client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=DMS_OFF)
             return
         question = event.get("text", "").strip()
         if question:
@@ -213,12 +245,14 @@ class SlackBot:
 
     # --- slash command ------------------------------------------------------
 
-    def handle_command(self, command: dict[str, Any], respond: Callable[..., Any]) -> None:
+    def handle_command(
+        self, command: dict[str, Any], respond: Callable[..., Any], client: Any
+    ) -> None:
         text = command.get("text", "").strip()
         sub, _, rest = text.partition(" ")
         sub = sub.lower()
         if sub in {"", "help"}:
-            respond(text=help_text(self.command), response_type="ephemeral")
+            respond(text=self._help(), response_type="ephemeral")
         elif sub == "status":
             respond(text=self._status(), response_type="ephemeral")
         elif sub == "sync":
@@ -238,6 +272,10 @@ class SlackBot:
             question = rest.strip() if sub == "ask" else text
             if not question:
                 respond(text=f"Usage: `{self.command} ask <question>`", response_type="ephemeral")
+                return
+            refusal = self._command_allowed(command, client)
+            if refusal is not None:
+                respond(text=refusal, response_type="ephemeral")
                 return
             self._answer_command(command, question, respond)
 
@@ -295,9 +333,11 @@ def register(app: Any, bot: SlackBot) -> None:
             bot.handle_dm(event, client)
 
     @app.command(bot.command)
-    def _command(ack: Callable[[], None], command: dict[str, Any], respond: Any) -> None:
+    def _command(
+        ack: Callable[[], None], command: dict[str, Any], respond: Any, client: Any
+    ) -> None:
         ack()  # Slack requires an acknowledgement within 3 seconds
-        bot.handle_command(command, respond)
+        bot.handle_command(command, respond, client)
 
     @app.action(FEEDBACK_UP)
     @app.action(FEEDBACK_DOWN)

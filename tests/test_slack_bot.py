@@ -18,7 +18,14 @@ from drive_agent.indexing.sync import SyncReport
 from drive_agent.interfaces.cli import app as cli_app
 from drive_agent.interfaces.slack_bot import bot as bot_module
 from drive_agent.interfaces.slack_bot import formatting, runner
-from drive_agent.interfaces.slack_bot.bot import HELP, SEARCHING, SlackBot, register
+from drive_agent.interfaces.slack_bot.bot import (
+    DMS_OFF,
+    HELP,
+    NOT_IN_CHANNEL,
+    SEARCHING,
+    SlackBot,
+    register,
+)
 from drive_agent.llm import LLMError
 
 from .fakes import FakeLLM
@@ -33,10 +40,26 @@ REPLY = AgentReply(
 )
 
 
+class SlackError(Exception):
+    """Shaped like slack_sdk's SlackApiError: the API response is on ``.response``."""
+
+    def __init__(self, error: str) -> None:
+        super().__init__(error)
+        self.response = {"ok": False, "error": error}
+
+
 class FakeClient:
-    def __init__(self) -> None:
+    def __init__(self, member_of: set[str] | None = None) -> None:
         self.posts: list[dict[str, Any]] = []
         self.updates: list[dict[str, Any]] = []
+        self.ephemeral: list[dict[str, Any]] = []
+        self.member_of = {"C1"} if member_of is None else member_of
+
+    def chat_postEphemeral(self, **kwargs: Any) -> dict[str, Any]:
+        if kwargs["channel"] not in self.member_of:
+            raise SlackError("not_in_channel")
+        self.ephemeral.append(kwargs)
+        return {"ok": True}
 
     def chat_postMessage(self, **kwargs: Any) -> dict[str, Any]:
         self.posts.append(kwargs)
@@ -152,18 +175,21 @@ def dm(**extra: Any) -> dict[str, Any]:
     }
 
 
-def test_direct_messages(tmp_path: Path) -> None:
+def test_direct_messages_when_turned_on(tmp_path: Path) -> None:
     agent, client = FakeAgent(), FakeClient()
-    bot = make_bot(tmp_path, agent)
+    bot = make_bot(tmp_path, agent, allow_dms=True)
     bot.handle_dm(dm(), client)
     bot.handle_dm(dm(channel_type="channel"), client)  # channel messages come as mentions
     bot.handle_dm(dm(subtype="message_changed"), client)
     bot.handle_dm(dm(bot_id="B1"), client)
     assert agent.calls == [("hi?", "slack:D1:5.5")]
 
-    off = make_bot(tmp_path, agent, allow_dms=False)
-    off.handle_dm(dm(), client)
-    assert client.posts[-1]["text"] == "Direct messages are turned off."
+
+def test_direct_messages_are_off_by_default(tmp_path: Path) -> None:
+    agent, client = FakeAgent(), FakeClient()
+    make_bot(tmp_path, agent).handle_dm(dm(), client)
+    assert client.posts[-1]["text"] == DMS_OFF
+    assert agent.calls == []
 
 
 def test_streaming_updates_are_throttled(tmp_path: Path) -> None:
@@ -211,37 +237,73 @@ def test_duplicate_events_are_answered_once(
 # --- slash command ------------------------------------------------------------
 
 
-def command(text: str, user: str = "U1") -> dict[str, Any]:
-    return {"command": "/drive-agent", "text": text, "user_id": user, "channel_id": "C1"}
+def command(text: str, user: str = "U1", channel: str = "C1") -> dict[str, Any]:
+    return {"command": "/drive-agent", "text": text, "user_id": user, "channel_id": channel}
+
+
+def test_command_question_only_where_the_bot_was_added(tmp_path: Path) -> None:
+    agent, respond = FakeAgent(), Responder()
+    make_bot(tmp_path, agent).handle_command(command("q", channel="C2"), respond, FakeClient())
+    assert respond.calls == [{"text": NOT_IN_CHANNEL, "response_type": "ephemeral"}]
+    assert agent.calls == []
+
+
+def test_command_question_respects_allowed_channels(tmp_path: Path) -> None:
+    agent, respond = FakeAgent(), Responder()
+    bot = make_bot(tmp_path, agent, allowed_channels=["C9"])
+    bot.handle_command(command("q"), respond, FakeClient(member_of={"C1", "C9"}))
+    assert respond.calls[0]["text"] == "I'm not enabled in this channel."
+    assert agent.calls == []
+
+
+def test_command_question_in_a_dm_needs_dms_on(tmp_path: Path) -> None:
+    agent, respond = FakeAgent(), Responder()
+    make_bot(tmp_path, agent).handle_command(command("q", channel="D1"), respond, FakeClient())
+    assert respond.calls == [{"text": DMS_OFF, "response_type": "ephemeral"}]
+    respond = Responder()
+    make_bot(tmp_path, agent, allow_dms=True).handle_command(
+        command("q", channel="D1"), respond, FakeClient()
+    )
+    assert agent.calls[0][0] == "q"
+
+
+def test_command_question_posts_a_private_searching_notice(tmp_path: Path) -> None:
+    client = FakeClient()
+    make_bot(tmp_path).handle_command(command("q"), Responder(), client)
+    assert client.ephemeral == [{"channel": "C1", "user": "U1", "text": SEARCHING}]
 
 
 @pytest.mark.parametrize("text", ["", "help", "HELP"])
 def test_command_help(tmp_path: Path, text: str) -> None:
     respond = Responder()
-    make_bot(tmp_path).handle_command(command(text), respond)
+    make_bot(tmp_path).handle_command(command(text), respond, FakeClient())
     assert respond.calls == [{"text": HELP, "response_type": "ephemeral"}]
 
 
 def test_command_status(tmp_path: Path) -> None:
     respond = Responder()
-    make_bot(tmp_path).handle_command(command("status"), respond)
+    make_bot(tmp_path).handle_command(command("status"), respond, FakeClient())
     assert respond.calls == [{"text": "32 chunks", "response_type": "ephemeral"}]
 
 
 def test_command_sync_is_admin_only(tmp_path: Path) -> None:
     respond = Responder()
-    make_bot(tmp_path, admin_users=["UADMIN"]).handle_command(command("sync"), respond)
+    make_bot(tmp_path, admin_users=["UADMIN"]).handle_command(
+        command("sync"), respond, FakeClient()
+    )
     assert "Only admins" in respond.calls[0]["text"]
 
     respond = Responder()
-    make_bot(tmp_path, admin_users=["UADMIN"]).handle_command(command("sync", "UADMIN"), respond)
+    make_bot(tmp_path, admin_users=["UADMIN"]).handle_command(
+        command("sync", "UADMIN"), respond, FakeClient()
+    )
     assert [c["text"] for c in respond.calls][-1] == "synced"
 
 
 @pytest.mark.parametrize("text", ["ask who knows Go?", "who knows Go?"])
 def test_command_question_is_private_and_stateless(tmp_path: Path, text: str) -> None:
     agent, respond = FakeAgent(), Responder()
-    make_bot(tmp_path, agent).handle_command(command(text), respond)
+    make_bot(tmp_path, agent).handle_command(command(text), respond, FakeClient())
     question, thread_id = agent.calls[0]
     assert question == "who knows Go?"
     assert thread_id is not None
@@ -252,11 +314,11 @@ def test_command_question_is_private_and_stateless(tmp_path: Path, text: str) ->
 
 def test_command_usage_and_errors(tmp_path: Path) -> None:
     respond = Responder()
-    make_bot(tmp_path).handle_command(command("ask"), respond)
+    make_bot(tmp_path).handle_command(command("ask"), respond, FakeClient())
     assert "Usage" in respond.calls[0]["text"]
     respond = Responder()
     make_bot(tmp_path, FakeAgent(error=LLMError("rate limited"))).handle_command(
-        command("ask q"), respond
+        command("ask q"), respond, FakeClient()
     )
     assert respond.calls[0]["text"] == ":warning: rate limited"
 
@@ -396,7 +458,9 @@ def test_bot_sync_goes_through_the_knowledge_base(
 ) -> None:
     bot = runner.make_bot(FakeKB(tmp_path, result))  # type: ignore[arg-type]
     respond = Responder()
-    bot.handle_command(command("sync", "Uanyone"), respond)  # admin_users ["*"]: everyone
+    bot.handle_command(
+        command("sync", "Uanyone"), respond, FakeClient()
+    )  # admin_users ["*"]: everyone
     assert respond.calls[-1]["text"].startswith(expected)
 
 

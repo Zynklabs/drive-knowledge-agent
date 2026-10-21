@@ -79,6 +79,7 @@ ENV_ALIASES: dict[str, str] = {
     "SLACK_MODE": "interfaces.slack.mode",
     "SLACK_ALLOWED_CHANNELS": "interfaces.slack.allowed_channels",
     "SLACK_ADMIN_USERS": "interfaces.slack.admin_users",
+    "SLACK_ALLOW_DMS": "interfaces.slack.allow_dms",
     "SLACK_COMMAND": "interfaces.slack.command",
     "SLACK_LOG_QUESTIONS": "interfaces.slack.log_questions",
     "LOG_DIR": "admin.log_dir",
@@ -250,7 +251,9 @@ class SlackSettings(_Section):
     http_port: int = Field(default=3000, gt=0, lt=65536)
     allowed_channels: list[str] = Field(default_factory=list)
     """Channel IDs the bot answers in; empty = every channel it is invited to."""
-    allow_dms: bool = True
+    allow_dms: bool = False
+    """Answer direct messages. Off by default: a DM reaches the whole folder without being in
+    any channel, so channel membership would no longer decide who can ask."""
     admin_users: list[str] = Field(default_factory=list)
     """Slack user IDs allowed to run `/drive-agent sync`; empty = nobody."""
     command: str = Field(default="/drive-agent", pattern=r"^/[a-z0-9_-]{1,31}$")

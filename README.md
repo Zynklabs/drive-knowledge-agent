@@ -122,7 +122,7 @@ pip install 'drive-knowledge-agent[slack]'
 drive-agent slack          # Socket Mode: no public URL needed
 ```
 
-Mention the bot or DM it: it answers in the thread with linked sources and 👍/👎 feedback, and it remembers the thread's conversation. `/drive-agent <question>` gives a private answer. **One bot per Drive folder:** `drive-agent bot add hr --folder <url>` creates a separate bot with its own index and Slack app, and you run it with `drive-agent --bot hr slack`. Full setup, including the Slack app manifest: **[docs/slack-setup.md](docs/slack-setup.md)**.
+Add the bot to a channel and mention it: it answers in the thread with linked sources and 👍/👎 feedback, and it remembers the thread's conversation. `/drive-agent <question>` gives a private answer. It answers only in channels it has been added to, so channel membership decides who can ask; direct messages are off unless you set `SLACK_ALLOW_DMS=true`. **One bot per Drive folder:** `drive-agent bot add hr --folder <url>` creates a separate bot with its own index and Slack app, and you run it with `drive-agent --bot hr slack`. Full setup, including the Slack app manifest: **[docs/slack-setup.md](docs/slack-setup.md)**.
 
 ## Configuration
 

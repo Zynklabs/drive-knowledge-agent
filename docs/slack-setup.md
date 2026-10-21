@@ -77,12 +77,18 @@ While the bot runs, it keeps its own index fresh: it re-syncs on `SYNC_SCHEDULE`
 | Setting (`drive-agent.yaml` → `interfaces.slack`) | Env var | Default | Meaning |
 |---|---|---|---|
 | `allowed_channels` | `SLACK_ALLOWED_CHANNELS` | empty = all | Channel IDs (e.g. `C0123ABC`) where the bot answers |
-| `allow_dms` | `DRIVE_AGENT__INTERFACES__SLACK__ALLOW_DMS` | `true` | Answer direct messages |
+| `allow_dms` | `SLACK_ALLOW_DMS` | `false` | Answer direct messages (see *Who can ask* below) |
 | `admin_users` | `SLACK_ADMIN_USERS` | empty = nobody | User IDs (e.g. `U0123ABC`) allowed to run `/drive-agent sync`; `*` = everyone |
 | `ingest.schedule_cron` | `SYNC_SCHEDULE` | `0 */6 * * *` | Auto-sync schedule (cron, UTC); `off` disables it |
 | `command` | `SLACK_COMMAND` | `/drive-agent` | The slash command; each bot in a workspace needs its own |
 | `mode` | `SLACK_MODE` | `socket` | `http` to receive events at a public URL instead |
 | `http_port` | `DRIVE_AGENT__INTERFACES__SLACK__HTTP_PORT` | `3000` | Port for HTTP mode |
+
+### Who can ask
+
+The bot answers only in channels it has been added to, so **channel membership decides who can query the folder**. This applies to mentions and to `/drive-agent <question>`: in a channel without the bot, the slash command asks you to add it first. Add a bot to a channel with `/invite @<bot name>`, and keep bots for sensitive folders in restricted channels. `SLACK_ALLOWED_CHANNELS` narrows this further to specific channels.
+
+Direct messages are **off by default**: a DM reaches the whole folder without being in any channel, so anyone in the workspace could query it. Turn them on per bot with `SLACK_ALLOW_DMS=true` only when everyone in the workspace may see that folder's content.
 
 ### HTTP mode (optional)
 
