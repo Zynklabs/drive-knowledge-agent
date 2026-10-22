@@ -1,5 +1,8 @@
 """``drive-agent sync``: load Drive files, embed new/changed chunks, prune stale ones.
 
+A file whose Drive version matches the one it was indexed from (see ``file_version``) is
+not downloaded again; its chunks are kept and counted as unchanged.
+
 Safety rules:
 - a file that fails to fetch or parse keeps its previously indexed chunks;
 - files that disappeared from Drive are pruned only when every folder was read successfully;
@@ -20,8 +23,9 @@ from typing import Any
 from langchain_core.documents import Document
 from langchain_core.indexing import index
 
-from drive_agent.core.config import Settings
+from drive_agent.core.config import IngestSettings, Settings
 from drive_agent.core.monitor import SyncProgress
+from drive_agent.drive.models import DriveFile
 from drive_agent.drive.walker import Progress
 from drive_agent.indexing.loader import FileResult, FolderLoad, stream_folder
 from drive_agent.indexing.state import STATE_DB, SQLiteRecordManager
@@ -72,11 +76,42 @@ def embedding_fingerprint(settings: Settings) -> str:
     return f"{settings.embeddings.provider}:{settings.embeddings.model}{suffix}"
 
 
+def file_version(file: DriveFile, ingest: IngestSettings) -> str | None:
+    """What a file's chunks were built from; a sync skips the file while this is unchanged.
+
+    Content is identified by Drive's ``md5Checksum``, or ``modifiedTime`` for Google
+    Docs/Slides, which have no md5. The metadata copied into every chunk and the chunking
+    settings are hashed in too, so a rename, a move or a new chunk size still re-indexes.
+    None (no md5 or modifiedTime) means the file is always reloaded.
+    """
+    content = file.md5 or file.modified_time
+    if content is None:
+        return None
+    context = json.dumps(
+        [
+            file.name,
+            file.path,
+            file.mime_type,
+            file.kind,
+            file.web_url,
+            file.owner,
+            file.drive_id,
+            file.root_folder_id,
+            ingest.chunk_tokens,
+            ingest.chunk_overlap,
+        ],
+        ensure_ascii=False,
+    )
+    return f"{content}:{hashlib.sha256(context.encode('utf-8')).hexdigest()[:16]}"
+
+
 def _index_file(
+    file: DriveFile,
     chunks: list[Document],
     records: SQLiteRecordManager,
     vector_index: VectorIndex,
     report: SyncReport,
+    version: str | None,
 ) -> None:
     """Embed and save one file's new chunks and drop its stale ones, as soon as it is loaded.
 
@@ -85,7 +120,8 @@ def _index_file(
     stays under the vector store's request size limit (Qdrant: 32 MB). The file's stale
     chunks are removed here, once all its new ones are saved, rather than by ``index()``'s
     incremental cleanup: that runs per batch and would delete, then re-embed, the later
-    chunks of any file spanning several batches.
+    chunks of any file spanning several batches. The file's version is recorded last, so a
+    file stopped part-way is downloaded again.
     """
     result = index(
         chunks,
@@ -97,18 +133,25 @@ def _index_file(
         batch_size=UPSERT_BATCH,
     )
     current = {chunk_key(chunk) for chunk in chunks}
-    stale = [
-        key
-        for key in records.list_keys(group_ids=[chunks[0].metadata["file_id"]])
-        if key not in current
-    ]
+    stale = [key for key in records.list_keys(group_ids=[file.id]) if key not in current]
     if stale:
         vector_index.store.delete(ids=stale)
         records.delete_keys(stale)
+    if version is None:
+        records.delete_file_version(file.id)
+    else:
+        records.set_file_version(file.id, version)
     report.added += result["num_added"]
     report.updated += result["num_updated"]
     report.unchanged += result["num_skipped"]
     report.deleted += len(stale)
+
+
+def _keep_unchanged(file: DriveFile, records: SQLiteRecordManager, report: SyncReport) -> None:
+    """Refresh a skipped file's records, so they read as seen by this sync, like re-indexed ones."""
+    keys = records.list_keys(group_ids=[file.id])
+    records.update(keys, group_ids=[file.id] * len(keys))
+    report.unchanged += len(keys)
 
 
 def run_sync(
@@ -164,31 +207,47 @@ def _run_sync(
         records.clear()  # the collection was dropped outside the agent: start over
         report.healed = True
 
+    indexed = records.file_versions()  # empty after a --full or healing reset
+
+    def is_current(file: DriveFile) -> bool:
+        version = file_version(file, settings.ingest)
+        return version is not None and indexed.get(file.id) == version
+
     for folder_id in settings.drive.folder_ids:
         load = FolderLoad(folder_id=folder_id)
         report.folders.append(load)
         for loaded in stream_folder(
-            service, settings, load, on_file=on_file, on_scan=on_scan, on_listed=progress.listed
+            service,
+            settings,
+            load,
+            on_file=on_file,
+            on_scan=on_scan,
+            on_listed=progress.listed,
+            is_current=is_current,
         ):
             added_before = report.added
-            if loaded.chunks:
-                _index_file(loaded.chunks, records, vector_index, report)
+            if loaded.unchanged:
+                _keep_unchanged(loaded.file, records, report)
+            elif loaded.chunks:
+                version = file_version(loaded.file, settings.ingest)
+                _index_file(loaded.file, loaded.chunks, records, vector_index, report, version)
             progress.file_done(
                 failed=loaded.error is not None,
-                empty=loaded.error is None and not loaded.chunks,
+                empty=_is_empty(loaded),
                 chunks_added=report.added - added_before,
             )
 
     if any(load.error for load in report.folders):
         report.prune_skipped = True
     else:
-        keep = {r.file.id for r in report.files if r.chunks or r.error}
+        keep = {r.file.id for r in report.files if r.chunks or r.error or r.unchanged}
         for group in records.list_groups():
             if group in keep:
                 continue
             keys = records.list_keys(group_ids=[group])
             vector_index.store.delete(ids=keys)
             records.delete_keys(keys)
+            records.delete_file_version(group)
             report.deleted += len(keys)
             report.pruned_files += 1
 
@@ -198,15 +257,19 @@ def _run_sync(
         "last_sync",
         {
             "at": datetime.now(UTC).isoformat(timespec="seconds"),
-            "files": len({r.file.id for r in report.files if r.chunks}),
+            "files": len({r.file.id for r in report.files if r.chunks or r.unchanged}),
             "chunks": records.count(),
             "failed": sum(1 for r in report.files if r.error),
             "total_files": len(report.files),
-            "empty": sum(1 for r in report.files if not r.error and not r.chunks),
+            "empty": sum(1 for r in report.files if _is_empty(r)),
             "skipped": sum(len(load.skipped) for load in report.folders),
         },
     )
     return report
+
+
+def _is_empty(result: FileResult) -> bool:
+    return result.error is None and not result.chunks and not result.unchanged
 
 
 def sync_now(

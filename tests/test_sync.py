@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,10 @@ PDF = "application/pdf"
 @pytest.fixture(autouse=True)
 def _fake_media(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(DriveFetcher, "_download", fake_download)
+
+
+def downloads(env: Env) -> list[str]:
+    return [file_id for file_id, _ in env.drive.media_calls]
 
 
 class Env:
@@ -92,9 +98,11 @@ def test_stopped_sync_keeps_saved_progress(env: Env) -> None:
     assert env.records.list_groups() == ["doc"]
     assert env.index.count() == 2
 
+    env.drive.media_calls.clear()
     report = env.sync()
     assert (report.added, report.unchanged) == (2, 2)
     assert env.index.count() == 4
+    assert downloads(env) == ["cv"]  # "doc" was finished, so it is not downloaded again
 
 
 def test_file_larger_than_a_batch_is_not_re_embedded(env: Env) -> None:
@@ -155,11 +163,74 @@ def test_resync_is_a_no_op(env: Env) -> None:
     assert env.index.count() == 4
 
 
+def test_unchanged_files_are_not_downloaded(env: Env) -> None:
+    env.sync()
+    assert downloads(env) == ["doc", "cv"]
+    before = env.records.get_time()
+    env.drive.media_calls.clear()
+    report = env.sync()
+    assert downloads(env) == []
+    assert [r.unchanged for r in report.files] == [True, True]
+    assert (report.added, report.unchanged, report.deleted, report.pruned_files) == (0, 4, 0, 0)
+    assert len(env.records.list_keys(after=before)) == 4  # every record marked as seen
+    progress = read_json(env.settings.data_dir / SYNC_PROGRESS_FILE)
+    assert progress is not None
+    assert (progress["files_done"], progress["files_empty"], progress["chunks_added"]) == (2, 0, 0)
+    last = env.records.get_meta("last_sync")
+    assert (last["files"], last["chunks"], last["empty"]) == (2, 4, 0)
+
+
+def test_file_without_md5_is_reloaded_when_modified_time_changes(env: Env) -> None:
+    del env.drive.items["doc"]["md5Checksum"]  # Google Docs have no md5
+    env.drive.items["doc"]["modifiedTime"] = "2026-10-01T09:00:00Z"
+    env.sync()
+    env.drive.media_calls.clear()
+    env.sync()
+    assert downloads(env) == []
+
+    env.drive.items["doc"]["modifiedTime"] = "2026-10-02T09:00:00Z"
+    env.drive.contents["doc"] = b"# Stages\n\nTwo onsite rounds now."
+    report = env.sync()
+    assert downloads(env) == ["doc"]
+    assert (report.added, report.deleted) == (1, 2)
+    texts = [d.page_content for d in env.index.store.similarity_search("x", k=10)]
+    assert any("Two onsite rounds" in t for t in texts)
+
+
+def test_file_without_any_version_is_always_reloaded(env: Env) -> None:
+    del env.drive.items["doc"]["md5Checksum"]
+    env.sync()
+    env.drive.media_calls.clear()
+    report = env.sync()
+    assert downloads(env) == ["doc"]
+    assert report.unchanged == 4
+
+
+def test_renamed_file_is_reindexed(env: Env) -> None:
+    # Same content (md5), but the name is in every chunk's text and metadata.
+    env.sync()
+    env.drive.items["cv"]["name"] = "Jane Doe CV.pdf"
+    env.drive.media_calls.clear()
+    env.sync()
+    assert downloads(env) == ["cv"]
+    names = {d.metadata["file_name"] for d in env.index.store.similarity_search("x", k=10)}
+    assert names == {"Process", "Jane Doe CV.pdf"}
+
+
+def test_full_sync_downloads_everything(env: Env) -> None:
+    env.sync()
+    env.drive.media_calls.clear()
+    env.sync(full=True)
+    assert downloads(env) == ["doc", "cv"]
+
+
 def test_changed_file_replaces_its_chunks(env: Env) -> None:
     env.sync()
     env.drive.items["doc"]["md5Checksum"] = "v2"
     env.drive.contents["doc"] = b"# Stages\n\nTwo onsite rounds now."
+    env.drive.media_calls.clear()
     report = env.sync()
+    assert downloads(env) == ["doc"]  # the unchanged PDF is not downloaded
     assert report.added == 1
     assert report.deleted == 2  # both old "doc" chunks
     assert report.unchanged == 2  # the PDF
@@ -172,10 +243,13 @@ def test_changed_file_replaces_its_chunks(env: Env) -> None:
 def test_removed_file_is_pruned(env: Env) -> None:
     env.sync()
     del env.drive.items["cv"]
+    env.drive.media_calls.clear()
     report = env.sync()
+    assert downloads(env) == []  # "doc" is unchanged and kept without a download
     assert (report.pruned_files, report.deleted) == (1, 2)
     assert env.records.list_groups() == ["doc"]
     assert env.index.count() == 2
+    assert env.records.file_versions().keys() == {"doc"}
 
 
 def test_file_that_stops_yielding_text_is_pruned(env: Env) -> None:
@@ -189,12 +263,18 @@ def test_file_that_stops_yielding_text_is_pruned(env: Env) -> None:
 
 def test_fetch_error_keeps_previous_chunks(env: Env) -> None:
     env.sync()
+    env.drive.items["cv"]["md5Checksum"] = "p2"  # changed, so it is fetched again
     env.drive.contents["cv"] = http_error(500, "backendError", "flaky")
     report = env.sync()
     assert report.deleted == 0
     assert env.index.count() == 4
     assert [r.error is not None for r in report.files] == [False, True]
     assert env.records.get_meta("last_sync")["failed"] == 1
+    # The old version is still on record, so the next sync tries the file again.
+    env.drive.contents["cv"] = make_pdf(["Jane Doe", "Python and Go", "Rust"])
+    env.drive.media_calls.clear()
+    env.sync()
+    assert downloads(env) == ["cv"]
 
 
 def test_folder_error_skips_pruning(tmp_path: Path) -> None:

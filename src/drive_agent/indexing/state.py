@@ -1,7 +1,9 @@
-"""Sync state in SQLite: LangChain's ``RecordManager`` contract plus a small key/value table.
+"""Sync state in SQLite: LangChain's ``RecordManager`` contract plus two small tables.
 
 The record manager remembers which chunk hashes are in the vector store and which file
-(group) each belongs to, so re-syncs skip unchanged chunks and clean up stale ones.
+(group) each belongs to, so re-syncs skip unchanged chunks and clean up stale ones. It also
+remembers the Drive version each file was indexed from, so re-syncs skip downloading files
+that have not changed.
 """
 
 from __future__ import annotations
@@ -32,6 +34,12 @@ CREATE TABLE IF NOT EXISTS meta (
     name      TEXT NOT NULL,
     value     TEXT NOT NULL,
     PRIMARY KEY (namespace, name)
+);
+CREATE TABLE IF NOT EXISTS file_version (
+    namespace TEXT NOT NULL,
+    file_id   TEXT NOT NULL,
+    version   TEXT NOT NULL,
+    PRIMARY KEY (namespace, file_id)
 );
 """
 
@@ -170,9 +178,35 @@ class SQLiteRecordManager(RecordManager):
         return int(row[0])
 
     def clear(self) -> None:
-        """Forget every record in this namespace (meta is kept)."""
+        """Forget every record and file version in this namespace (meta is kept)."""
         with self._db:
             self._db.execute("DELETE FROM upsertion_record WHERE namespace = ?", [self.namespace])
+            self._db.execute("DELETE FROM file_version WHERE namespace = ?", [self.namespace])
+
+    def file_versions(self) -> dict[str, str]:
+        """Version each file was indexed from, for files that still have records."""
+        rows = self._db.execute(
+            "SELECT file_id, version FROM file_version v WHERE namespace = ? AND EXISTS ("
+            "SELECT 1 FROM upsertion_record r "
+            "WHERE r.namespace = v.namespace AND r.group_id = v.file_id)",
+            [self.namespace],
+        )
+        return {row[0]: row[1] for row in rows}
+
+    def set_file_version(self, file_id: str, version: str) -> None:
+        with self._db:
+            self._db.execute(
+                "INSERT INTO file_version (namespace, file_id, version) VALUES (?, ?, ?) "
+                "ON CONFLICT (namespace, file_id) DO UPDATE SET version = excluded.version",
+                [self.namespace, file_id, version],
+            )
+
+    def delete_file_version(self, file_id: str) -> None:
+        with self._db:
+            self._db.execute(
+                "DELETE FROM file_version WHERE namespace = ? AND file_id = ?",
+                [self.namespace, file_id],
+            )
 
     def get_meta(self, name: str) -> Any:
         row = self._db.execute(

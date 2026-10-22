@@ -57,6 +57,8 @@ def _sync(kb: KnowledgeBase, *, full: bool) -> SyncReport | None:
         def on_file(result: FileResult) -> None:
             if result.error:
                 status.write(f"✗ {result.file.path}: {result.error}")
+            elif result.unchanged:
+                status.write(f"✓ {result.file.path} · unchanged")
             else:
                 status.write(f"✓ {result.file.path} · {len(result.chunks)} chunks")
 
@@ -91,7 +93,7 @@ def _report(report: SyncReport) -> None:
             "file": r.file.path,
             "chunks": len(r.chunks),
             "~tokens": r.tokens,
-            "notes": r.error or "; ".join(r.warnings),
+            "notes": r.error or "; ".join(r.warnings) or ("unchanged" if r.unchanged else ""),
         }
         for r in report.files
     ]
