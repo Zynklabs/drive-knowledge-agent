@@ -107,3 +107,51 @@ def test_input_length_is_capped_never_raised(
     monkeypatch.setattr(local, "_load_model", lambda name, cache_dir: model)
     FastEmbedEmbeddings("nomic-ai/nomic-embed-text-v1.5", cache_dir=tmp_path, max_tokens=1024)
     assert tokenizer.truncation == {"max_length": expected, "direction": "left"}
+
+
+class FakeSession:
+    def __init__(self) -> None:
+        self.run_options: list[Any] = []
+
+    def run(self, output_names: Any, input_feed: Any, run_options: Any = None) -> list[str]:
+        self.run_options.append(run_options)
+        return ["out"]
+
+
+def test_every_run_shrinks_the_memory_arena(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    session = FakeSession()
+    model = FakeModel()
+    model.model = type("Inner", (), {"model": session})()  # type: ignore[attr-defined]
+    monkeypatch.setattr(local, "_load_model", lambda name, cache_dir: model)
+    FastEmbedEmbeddings("nomic-ai/nomic-embed-text-v1.5", cache_dir=tmp_path)
+
+    assert session.run(["x"], {"input_ids": 1}) == ["out"]
+    key, value = local.ARENA_SHRINKAGE
+    assert session.run_options[0].get_run_config_entry(key) == value
+
+    explicit = object()
+    session.run(["x"], {}, explicit)
+    assert session.run_options[1] is explicit
+
+
+def test_documents_embed_longest_first_in_small_batches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    batch_sizes: list[int | None] = []
+
+    class RecordingModel(FakeModel):
+        def embed(self, texts: Iterable[str], batch_size: int | None = None) -> Iterator[Any]:
+            batch_sizes.append(batch_size)
+            return super().embed(texts, batch_size)
+
+    model = RecordingModel()
+    monkeypatch.setattr(local, "_load_model", lambda name, cache_dir: model)
+    emb = FastEmbedEmbeddings("ibm-granite/granite-embedding-small-english-r2", cache_dir=tmp_path)
+
+    vectors = emb.embed_documents(["bb", "dddd", "a", "ccc"])
+
+    assert model.seen == ["dddd", "ccc", "bb", "a"]
+    assert [v[0] for v in vectors] == [2.0, 4.0, 1.0, 3.0]  # back in input order
+    assert batch_sizes == [local.BATCH_SIZE]
