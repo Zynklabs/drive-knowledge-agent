@@ -25,6 +25,8 @@ class FileResult:
     chunks: list[Document] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     error: str | None = None
+    unchanged: bool = False
+    """Same Drive version as when last indexed, so not downloaded; ``chunks`` stays empty."""
 
     @property
     def tokens(self) -> int:
@@ -68,11 +70,14 @@ def stream_folder(
     on_file: Callable[[FileResult], None] | None = None,
     on_scan: Progress | None = None,
     on_listed: Callable[[int], None] | None = None,
+    is_current: Callable[[DriveFile], bool] | None = None,
 ) -> Iterator[FileResult]:
     """Yield each file as soon as it is loaded, recording results and errors on ``load``.
 
     The whole tree is listed before any download (listing is fast; downloads are not), so
     ``on_listed`` gets the number of files to load up front and progress can show "n of N".
+    Files for which ``is_current`` returns True are yielded as ``unchanged`` without being
+    downloaded or parsed.
     """
     walker = DriveWalker(service, settings.drive, on_progress=on_scan)
     fetcher = DriveFetcher(service, max_bytes=settings.drive.max_file_mb * 1024 * 1024)
@@ -87,7 +92,10 @@ def stream_folder(
         if on_listed is not None:
             on_listed(len(files))
         for item in files:
-            result = load_file(fetcher, item, settings.ingest)
+            if is_current is not None and is_current(item):
+                result = FileResult(file=item, unchanged=True)
+            else:
+                result = load_file(fetcher, item, settings.ingest)
             load.files.append(result)
             if on_file is not None:
                 on_file(result)

@@ -276,7 +276,9 @@ def _render_load(load: FolderLoad, show_chunks: int) -> None:
             if result.warnings
             else "[green]✓[/green]"
         )
-        notes = result.error or "; ".join(result.warnings)
+        notes = (
+            result.error or "; ".join(result.warnings) or ("unchanged" if result.unchanged else "")
+        )
         table.add_row(mark, result.file.path, str(len(result.chunks)), f"{result.tokens:,}", notes)
     console.print(table)
     if load.skipped:
