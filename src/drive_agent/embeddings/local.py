@@ -51,6 +51,39 @@ def _cap_input_tokens(model: Any, max_tokens: int) -> None:
         )
 
 
+ARENA_SHRINKAGE = ("memory.enable_memory_arena_shrinkage", "cpu:0")
+"""onnxruntime run option that hands the CPU memory arena back to the OS after each run. The
+arena otherwise keeps its peak for the life of the process: a few full-length batches leave a
+sync, or the Slack bot that runs auto-sync, holding ~8 GB long after embedding is done.
+Re-allocating per run costs no measurable throughput next to the model's own compute."""
+
+
+def _release_arena_after_each_run(model: Any) -> None:
+    """Make every ``InferenceSession.run`` of ``model`` shrink the arena when it finishes.
+
+    FastEmbed 0.9 exposes session options (``enable_cpu_mem_arena``) but not run options, so we
+    wrap the session's public ``run`` and pass ours whenever the caller passed none."""
+    session: Any = getattr(getattr(model, "model", None), "model", None)
+    run = getattr(session, "run", None)
+    if run is None:
+        return
+    import onnxruntime as ort
+
+    options = ort.RunOptions()
+    options.add_run_config_entry(*ARENA_SHRINKAGE)
+
+    def run_and_shrink(output_names: Any, input_feed: Any, run_options: Any = None) -> Any:
+        return run(output_names, input_feed, run_options or options)
+
+    session.run = run_and_shrink
+
+
+BATCH_SIZE = 4
+"""Texts per model run. Peak memory grows with batch size times the square of the batch's
+longest input: 16 inputs at the 1,024-token cap peaked near 8 GB, 4 stay under 3 GB. Smaller
+batches also pad less, so with length-sorted input they are faster, not slower."""
+
+
 class FastEmbedEmbeddings(Embeddings):
     """LangChain ``Embeddings`` over a FastEmbed ``TextEmbedding`` model."""
 
@@ -59,21 +92,28 @@ class FastEmbedEmbeddings(Embeddings):
         model_name: str,
         cache_dir: Path,
         *,
-        batch_size: int = 16,
+        batch_size: int = BATCH_SIZE,
         max_tokens: int = MAX_INPUT_TOKENS,
     ) -> None:
         cache_dir.mkdir(parents=True, exist_ok=True)
         self.model_name = model_name
         self._model = _load_model(model_name, cache_dir)
         _cap_input_tokens(self._model, max_tokens)
+        _release_arena_after_each_run(self._model)
         self._batch_size = batch_size
         self._doc_prefix, self._query_prefix = MODEL_PREFIXES.get(model_name, ("", ""))
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        prefixed = [self._doc_prefix + text for text in texts]
-        return [
-            vector.tolist() for vector in self._model.embed(prefixed, batch_size=self._batch_size)
-        ]
+        """Embed longest first: a batch is padded to its longest input, so grouping similar
+        lengths cuts wasted compute, and the most memory-hungry batch runs first, not mid-sync."""
+        order = sorted(range(len(texts)), key=lambda i: len(texts[i]), reverse=True)
+        vectors = self._model.embed(
+            [self._doc_prefix + texts[i] for i in order], batch_size=self._batch_size
+        )
+        result: list[list[float]] = [[] for _ in texts]
+        for i, vector in zip(order, vectors, strict=True):
+            result[i] = vector.tolist()
+        return result
 
     def embed_query(self, text: str) -> list[float]:
         vector = next(iter(self._model.embed([self._query_prefix + text])))
