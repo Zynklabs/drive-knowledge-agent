@@ -259,6 +259,80 @@ def test_file_that_stops_yielding_text_is_pruned(env: Env) -> None:
     report = env.sync()
     assert report.pruned_files == 1
     assert env.records.list_groups() == ["doc"]
+    env.drive.media_calls.clear()
+    report = env.sync()
+    assert downloads(env) == []  # now remembered as empty
+    assert (report.pruned_files, report.deleted) == (0, 0)
+
+
+def add_scan(env: Env) -> None:
+    """An image-only PDF: loads fine but yields no text."""
+    env.drive.items["scan"] = file("scan", "Scan.pdf", PDF, "root", size=10, md5Checksum="s1")
+    env.drive.contents["scan"] = make_pdf([""])
+
+
+def test_empty_file_is_not_reloaded(env: Env) -> None:
+    add_scan(env)
+    env.sync()
+    assert downloads(env) == ["doc", "cv", "scan"]
+    env.drive.media_calls.clear()
+    report = env.sync()
+    assert downloads(env) == []
+    assert [r.unchanged for r in report.files] == [True, True, True]
+    assert (report.added, report.unchanged, report.deleted) == (0, 4, 0)
+    progress = read_json(env.settings.data_dir / SYNC_PROGRESS_FILE)
+    assert progress is not None
+    assert (progress["files_done"], progress["files_empty"]) == (3, 1)
+    last = env.records.get_meta("last_sync")
+    assert (last["files"], last["empty"], last["total_files"]) == (2, 1, 3)
+
+
+def test_changed_empty_file_is_reloaded(env: Env) -> None:
+    add_scan(env)
+    env.sync()
+    env.drive.items["scan"]["md5Checksum"] = "s2"  # re-scanned with OCR
+    env.drive.contents["scan"] = make_pdf(["Signed offer letter"])
+    env.drive.media_calls.clear()
+    report = env.sync()
+    assert downloads(env) == ["scan"]
+    assert report.added == 1
+    assert env.records.list_groups() == ["cv", "doc", "scan"]
+
+
+def test_empty_file_removed_from_drive_is_forgotten(env: Env) -> None:
+    add_scan(env)
+    env.sync()
+    assert "scan" in env.records.file_version_ids()
+    del env.drive.items["scan"]
+    report = env.sync()
+    assert report.pruned_files == 0  # it had no chunks to prune
+    assert env.records.file_version_ids() == ["cv", "doc"]
+
+
+def test_empty_file_version_is_kept_while_a_folder_fails(tmp_path: Path) -> None:
+    e = Env(tmp_path, folders=["root", "missing"])
+    try:
+        add_scan(e)
+        e.sync()
+        del e.drive.items["scan"]
+        e.sync()
+        assert "scan" in e.records.file_version_ids()  # nothing forgotten on a partial read
+    finally:
+        e.records.close()
+        e.index.close()
+
+
+def test_empty_file_that_fails_keeps_its_version(env: Env) -> None:
+    add_scan(env)
+    env.sync()
+    env.drive.items["scan"]["md5Checksum"] = "s2"
+    env.drive.contents["scan"] = http_error(500, "backendError", "flaky")
+    env.sync()
+    assert env.records.file_versions()["scan"].empty is True
+    env.drive.contents["scan"] = make_pdf([""])
+    env.drive.media_calls.clear()
+    env.sync()
+    assert downloads(env) == ["scan"]  # still the old version on record, so retried
 
 
 def test_fetch_error_keeps_previous_chunks(env: Env) -> None:

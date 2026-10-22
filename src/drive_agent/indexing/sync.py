@@ -1,7 +1,8 @@
 """``drive-agent sync``: load Drive files, embed new/changed chunks, prune stale ones.
 
 A file whose Drive version matches the one it was indexed from (see ``file_version``) is
-not downloaded again; its chunks are kept and counted as unchanged.
+not downloaded again; its chunks are kept and counted as unchanged. Files that loaded fine
+but had no text are remembered the same way, so they are not reloaded either.
 
 Safety rules:
 - a file that fails to fetch or parse keeps its previously indexed chunks;
@@ -28,7 +29,7 @@ from drive_agent.core.monitor import SyncProgress
 from drive_agent.drive.models import DriveFile
 from drive_agent.drive.walker import Progress
 from drive_agent.indexing.loader import FileResult, FolderLoad, stream_folder
-from drive_agent.indexing.state import STATE_DB, SQLiteRecordManager
+from drive_agent.indexing.state import STATE_DB, IndexedVersion, SQLiteRecordManager
 from drive_agent.vectorstores.base import VectorIndex
 
 UPSERT_BATCH = 64
@@ -137,14 +138,20 @@ def _index_file(
     if stale:
         vector_index.store.delete(ids=stale)
         records.delete_keys(stale)
-    if version is None:
-        records.delete_file_version(file.id)
-    else:
-        records.set_file_version(file.id, version)
+    _save_version(records, file, version, empty=False)
     report.added += result["num_added"]
     report.updated += result["num_updated"]
     report.unchanged += result["num_skipped"]
     report.deleted += len(stale)
+
+
+def _save_version(
+    records: SQLiteRecordManager, file: DriveFile, version: str | None, *, empty: bool
+) -> None:
+    if version is None:
+        records.delete_file_versions([file.id])
+    else:
+        records.set_file_version(file.id, version, empty=empty)
 
 
 def _keep_unchanged(file: DriveFile, records: SQLiteRecordManager, report: SyncReport) -> None:
@@ -211,7 +218,8 @@ def _run_sync(
 
     def is_current(file: DriveFile) -> bool:
         version = file_version(file, settings.ingest)
-        return version is not None and indexed.get(file.id) == version
+        previous = indexed.get(file.id)
+        return version is not None and previous is not None and previous.version == version
 
     for folder_id in settings.drive.folder_ids:
         load = FolderLoad(folder_id=folder_id)
@@ -226,30 +234,35 @@ def _run_sync(
             is_current=is_current,
         ):
             added_before = report.added
+            version = file_version(loaded.file, settings.ingest)
             if loaded.unchanged:
-                _keep_unchanged(loaded.file, records, report)
+                if not indexed[loaded.file.id].empty:
+                    _keep_unchanged(loaded.file, records, report)
             elif loaded.chunks:
-                version = file_version(loaded.file, settings.ingest)
                 _index_file(loaded.file, loaded.chunks, records, vector_index, report, version)
+            elif loaded.error is None:  # loaded fine but has no text: skip it next time too
+                _save_version(records, loaded.file, version, empty=True)
             progress.file_done(
                 failed=loaded.error is not None,
-                empty=_is_empty(loaded),
+                empty=_is_empty(loaded, indexed),
                 chunks_added=report.added - added_before,
             )
 
     if any(load.error for load in report.folders):
         report.prune_skipped = True
     else:
-        keep = {r.file.id for r in report.files if r.chunks or r.error or r.unchanged}
+        keep = {r.file.id for r in report.files if r.error or _has_chunks(r, indexed)}
         for group in records.list_groups():
             if group in keep:
                 continue
             keys = records.list_keys(group_ids=[group])
             vector_index.store.delete(ids=keys)
             records.delete_keys(keys)
-            records.delete_file_version(group)
             report.deleted += len(keys)
             report.pruned_files += 1
+        # Files now empty keep their (empty) version; only files gone from Drive are forgotten.
+        listed = {r.file.id for r in report.files}
+        records.delete_file_versions([f for f in records.file_version_ids() if f not in listed])
 
     report.seconds = round(time.monotonic() - started, 1)
     records.set_meta("embedding", fingerprint)
@@ -257,19 +270,26 @@ def _run_sync(
         "last_sync",
         {
             "at": datetime.now(UTC).isoformat(timespec="seconds"),
-            "files": len({r.file.id for r in report.files if r.chunks or r.unchanged}),
+            "files": len({r.file.id for r in report.files if _has_chunks(r, indexed)}),
             "chunks": records.count(),
             "failed": sum(1 for r in report.files if r.error),
             "total_files": len(report.files),
-            "empty": sum(1 for r in report.files if _is_empty(r)),
+            "empty": sum(1 for r in report.files if _is_empty(r, indexed)),
             "skipped": sum(len(load.skipped) for load in report.folders),
         },
     )
     return report
 
 
-def _is_empty(result: FileResult) -> bool:
-    return result.error is None and not result.chunks and not result.unchanged
+def _has_chunks(result: FileResult, indexed: dict[str, IndexedVersion]) -> bool:
+    """Loaded with text this sync, or skipped as unchanged with its chunks kept."""
+    if result.unchanged:
+        return not indexed[result.file.id].empty
+    return bool(result.chunks)
+
+
+def _is_empty(result: FileResult, indexed: dict[str, IndexedVersion]) -> bool:
+    return result.error is None and not _has_chunks(result, indexed)
 
 
 def sync_now(

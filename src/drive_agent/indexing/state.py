@@ -13,7 +13,7 @@ import sqlite3
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from langchain_core.indexing import RecordManager
 
@@ -39,9 +39,16 @@ CREATE TABLE IF NOT EXISTS file_version (
     namespace TEXT NOT NULL,
     file_id   TEXT NOT NULL,
     version   TEXT NOT NULL,
+    empty     INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (namespace, file_id)
 );
 """
+
+
+class IndexedVersion(NamedTuple):
+    version: str
+    empty: bool
+    """The file loaded fine but yielded no text, so it has no records."""
 
 
 class SQLiteRecordManager(RecordManager):
@@ -59,6 +66,11 @@ class SQLiteRecordManager(RecordManager):
     def create_schema(self) -> None:
         with self._db:
             self._db.executescript(_SCHEMA)
+            columns = {row[1] for row in self._db.execute("PRAGMA table_info(file_version)")}
+            if "empty" not in columns:  # state.db written before empty files were recorded
+                self._db.execute(
+                    "ALTER TABLE file_version ADD COLUMN empty INTEGER NOT NULL DEFAULT 0"
+                )
 
     def get_time(self) -> float:
         return time.time()
@@ -183,30 +195,40 @@ class SQLiteRecordManager(RecordManager):
             self._db.execute("DELETE FROM upsertion_record WHERE namespace = ?", [self.namespace])
             self._db.execute("DELETE FROM file_version WHERE namespace = ?", [self.namespace])
 
-    def file_versions(self) -> dict[str, str]:
-        """Version each file was indexed from, for files that still have records."""
+    def file_versions(self) -> dict[str, IndexedVersion]:
+        """Version each file was indexed from, for files that are empty or still have records."""
         rows = self._db.execute(
-            "SELECT file_id, version FROM file_version v WHERE namespace = ? AND EXISTS ("
-            "SELECT 1 FROM upsertion_record r "
-            "WHERE r.namespace = v.namespace AND r.group_id = v.file_id)",
+            "SELECT file_id, version, empty FROM file_version v WHERE namespace = ? AND ("
+            "empty = 1 OR EXISTS (SELECT 1 FROM upsertion_record r "
+            "WHERE r.namespace = v.namespace AND r.group_id = v.file_id))",
             [self.namespace],
         )
-        return {row[0]: row[1] for row in rows}
+        return {row[0]: IndexedVersion(row[1], bool(row[2])) for row in rows}
 
-    def set_file_version(self, file_id: str, version: str) -> None:
+    def file_version_ids(self) -> list[str]:
+        rows = self._db.execute(
+            "SELECT file_id FROM file_version WHERE namespace = ? ORDER BY file_id",
+            [self.namespace],
+        )
+        return [row[0] for row in rows]
+
+    def set_file_version(self, file_id: str, version: str, *, empty: bool = False) -> None:
         with self._db:
             self._db.execute(
-                "INSERT INTO file_version (namespace, file_id, version) VALUES (?, ?, ?) "
-                "ON CONFLICT (namespace, file_id) DO UPDATE SET version = excluded.version",
-                [self.namespace, file_id, version],
+                "INSERT INTO file_version (namespace, file_id, version, empty) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (namespace, file_id) "
+                "DO UPDATE SET version = excluded.version, empty = excluded.empty",
+                [self.namespace, file_id, version, int(empty)],
             )
 
-    def delete_file_version(self, file_id: str) -> None:
+    def delete_file_versions(self, file_ids: Sequence[str]) -> None:
         with self._db:
-            self._db.execute(
-                "DELETE FROM file_version WHERE namespace = ? AND file_id = ?",
-                [self.namespace, file_id],
-            )
+            for batch in _batches(file_ids):
+                marks = ",".join("?" * len(batch))
+                self._db.execute(
+                    f"DELETE FROM file_version WHERE namespace = ? AND file_id IN ({marks})",  # noqa: S608
+                    [self.namespace, *batch],
+                )
 
     def get_meta(self, name: str) -> Any:
         row = self._db.execute(

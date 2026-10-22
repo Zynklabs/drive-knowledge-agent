@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -84,3 +85,38 @@ def test_async_variants_delegate(records: SQLiteRecordManager) -> None:
         return await records.alist_keys(group_ids=["F"])
 
     assert asyncio.run(scenario()) == ["a"]
+
+
+def test_file_versions(records: SQLiteRecordManager) -> None:
+    records.update(["a"], group_ids=["F1"])
+    records.set_file_version("F1", "v1")
+    records.set_file_version("F2", "v2", empty=True)
+    records.set_file_version("F3", "v3")  # no records: not current
+    versions = records.file_versions()
+    assert versions == {"F1": ("v1", False), "F2": ("v2", True)}
+    assert records.file_version_ids() == ["F1", "F2", "F3"]
+    records.set_file_version("F1", "v4", empty=True)
+    assert records.file_versions()["F1"] == ("v4", True)
+    records.delete_file_versions(["F1", "F3"])
+    assert records.file_version_ids() == ["F2"]
+    records.clear()
+    assert records.file_version_ids() == []
+
+
+def test_file_version_table_without_empty_column_is_upgraded(tmp_path: Path) -> None:
+    db = sqlite3.connect(tmp_path / "state.db")
+    db.execute(
+        "CREATE TABLE file_version (namespace TEXT NOT NULL, file_id TEXT NOT NULL, "
+        "version TEXT NOT NULL, PRIMARY KEY (namespace, file_id))"
+    )
+    db.execute("INSERT INTO file_version VALUES ('ns', 'F1', 'v1')")
+    db.commit()
+    db.close()
+    rm = SQLiteRecordManager("ns", tmp_path / "state.db")
+    try:
+        rm.update(["a"], group_ids=["F1"])
+        assert rm.file_versions() == {"F1": ("v1", False)}
+        rm.set_file_version("F2", "v2", empty=True)
+        assert rm.file_versions()["F2"].empty is True
+    finally:
+        rm.close()
