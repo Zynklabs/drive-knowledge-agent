@@ -79,6 +79,7 @@ streamlit = [
 ]
 slack = [
     "slack-bolt>=1.21",
+    "websocket-client>=1.8",
 ]
 
 [dependency-groups]

@@ -83,6 +83,18 @@ While the bot runs, it keeps its own index fresh: it re-syncs on `SYNC_SCHEDULE`
 | `command` | `SLACK_COMMAND` | `/drive-agent` | The slash command; each bot in a workspace needs its own |
 | `mode` | `SLACK_MODE` | `socket` | `http` to receive events at a public URL instead |
 | `http_port` | `DRIVE_AGENT__INTERFACES__SLACK__HTTP_PORT` | `3000` | Port for HTTP mode |
+| `watchdog` | `SLACK_WATCHDOG` | `true` | Recover a Socket Mode connection stuck reconnecting (see *Connection watchdog*) |
+| `watchdog_failures` | `SLACK_WATCHDOG_FAILURES` | `10` | Connection drops or errors within 10 minutes that count as stuck; `0` = act only on an outright disconnect |
+| `watchdog_grace_seconds` | `SLACK_WATCHDOG_GRACE_SECONDS` | `120` | How long the connection may stay stuck or disconnected before the watchdog acts |
+
+### Connection watchdog
+
+The bot uses Slack's websocket-client Socket Mode adapter (in the `slack` extra), which recovers from network blips better than the library's builtin client. Still, Socket Mode can get stuck in a loop where each new connection breaks at once (for example with `BrokenPipeError`): the process stays up, yet no messages reach the bot, and only a restart helps. The watchdog checks the connection every 15 seconds. When the connection has had at least `SLACK_WATCHDOG_FAILURES` drops or errors in 10 minutes, or stayed disconnected, for longer than `SLACK_WATCHDOG_GRACE_SECONDS`, it:
+
+1. closes the Socket Mode client and connects with a fresh one;
+2. if the trouble comes back before the fresh client has held for 10 minutes, exits with code `75` so the service manager starts the bot again. Run the bot under one that restarts it on a non-zero exit (launchd `KeepAlive`, systemd `Restart=on-failure`, Docker `restart: unless-stopped`); otherwise it simply stops.
+
+It never exits while a sync is running: it waits for the sync to finish. Slack's normal connection rotation (one drop every few hours) never trips it. Each reconnect and restart is logged with the reason and recorded in the activity log, and the admin portal's bot card shows those of the last 24 hours.
 
 ### Who can ask
 

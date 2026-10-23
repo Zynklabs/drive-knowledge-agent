@@ -14,10 +14,21 @@ FALLBACK_CHARS = 300
 FEEDBACK_UP = "feedback_up"
 FEEDBACK_DOWN = "feedback_down"
 
+TABLE_WIDTH = 60
+"""Widest table shown as an aligned monospace block; wider ones wrap on phones and lose their
+alignment, so each row becomes one bullet line instead."""
+
 _LINK = re.compile(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)")
 _BOLD = re.compile(r"\*\*(.+?)\*\*")
+_ITALIC = re.compile(r"(?<![*\w])\*(?![\s*])(.+?)(?<![\s*])\*(?![*\w])")
+_STRIKE = re.compile(r"~~(.+?)~~")
 _HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*#*$", re.MULTILINE)
+_BULLET = re.compile(r"^( *)[-*+]\s+", re.MULTILINE)
+_RULE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$", re.MULTILINE)
+_TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
+_TABLE_DIVIDER = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$")
 _MENTION = re.compile(r"<@[A-Z0-9]+>")
+FENCE = "```"
 
 
 def escape(text: str) -> str:
@@ -26,11 +37,75 @@ def escape(text: str) -> str:
 
 
 def to_mrkdwn(markdown: str) -> str:
-    """Convert the Markdown Claude writes into Slack mrkdwn."""
-    text = escape(markdown)
+    """Convert the Markdown Claude writes into Slack mrkdwn.
+
+    Slack has no tables, Markdown lists or ``*italic*``, so those would otherwise show up as
+    raw pipes, dashes and asterisks. Code blocks are left as they are.
+    """
+    parts = _convert_tables(markdown).split(FENCE)
+    for i in range(0, len(parts), 2):  # even parts are outside code blocks
+        parts[i] = _inline_mrkdwn(escape(parts[i]))
+    for i in range(1, len(parts), 2):
+        parts[i] = escape(parts[i])
+    return FENCE.join(parts)
+
+
+def _inline_mrkdwn(text: str) -> str:
     text = _LINK.sub(lambda m: f"<{m.group(2)}|{m.group(1)}>", text)
+    text = _RULE.sub("", text)
+    text = _BULLET.sub(lambda m: "    " * (len(m.group(1)) // 2) + "• ", text)
+    text = _ITALIC.sub(r"_\1_", text)  # before bold, which turns ** into Slack's single *
     text = _BOLD.sub(r"*\1*", text)
+    text = _STRIKE.sub(r"~\1~", text)
     return _HEADING.sub(r"*\1*", text)
+
+
+def _cells(line: str) -> list[str]:
+    return [_BOLD.sub(r"\1", cell.strip()) for cell in line.strip().strip("|").split("|")]
+
+
+def _convert_tables(markdown: str) -> str:
+    """Replace each Markdown table (header row, divider row, body rows) with a Slack form."""
+    lines = markdown.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        if i + 1 < len(lines) and _TABLE_ROW.match(lines[i]) and _TABLE_DIVIDER.match(lines[i + 1]):
+            header = _cells(lines[i])
+            rows: list[list[str]] = []
+            i += 2
+            while i < len(lines) and _TABLE_ROW.match(lines[i]):
+                rows.append(_cells(lines[i]))
+                i += 1
+            out.append(_render_table(header, rows))
+            continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
+
+
+def _render_table(header: list[str], rows: list[list[str]]) -> str:
+    columns = len(header)
+    rows = [(row + [""] * columns)[:columns] for row in rows]
+    widths = [max(len(r[c]) for r in [header, *rows]) for c in range(columns)]
+    if sum(widths) + 3 * (columns - 1) <= TABLE_WIDTH:
+
+        def line(row: list[str]) -> str:
+            cells = (cell.ljust(width) for cell, width in zip(row, widths, strict=True))
+            return " | ".join(cells).rstrip()
+
+        rule = "-+-".join("-" * width for width in widths)
+        body = "\n".join([line(header), rule, *(line(row) for row in rows)])
+        return f"{FENCE}\n{body}\n{FENCE}"
+    bullets = []
+    for first, *rest in rows:
+        details = " · ".join(
+            f"{name}: {value}" if name else value
+            for name, value in zip(header[1:], rest, strict=True)
+            if value
+        )
+        bullets.append(f"- **{first}**" + (f" — {details}" if details else ""))
+    return "\n".join(bullets)
 
 
 def strip_mentions(text: str) -> str:
@@ -38,7 +113,19 @@ def strip_mentions(text: str) -> str:
 
 
 def split_sections(text: str, limit: int = SECTION_LIMIT) -> list[str]:
-    """Split on paragraph, then line, boundaries so each piece fits one section block."""
+    """Split on paragraph, then line, boundaries so each piece fits one section block.
+
+    A code block cut in two is closed at the end of one piece and reopened in the next.
+    """
+    pieces = _split(text, limit - 2 * (len(FENCE) + 1))
+    for i in range(len(pieces) - 1):
+        if pieces[i].count(FENCE) % 2:
+            pieces[i] += f"\n{FENCE}"
+            pieces[i + 1] = f"{FENCE}\n{pieces[i + 1]}"
+    return pieces
+
+
+def _split(text: str, limit: int) -> list[str]:
     pieces: list[str] = []
     current = ""
     for paragraph in text.split("\n\n"):

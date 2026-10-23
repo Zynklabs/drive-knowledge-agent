@@ -28,6 +28,7 @@ from drive_agent.interfaces.admin.data import (
     health_of,
     log_files,
     overview,
+    slack_health_of,
     tail,
 )
 from drive_agent.interfaces.cli import app as cli_app
@@ -282,3 +283,74 @@ def test_portal_password(tmp_path: Path) -> None:
     at.text_input[0].input("s3cret").run()
     assert not at.exception
     assert at.title[0].value == "Bots"
+
+
+# --- Slack connection ----------------------------------------------------------------
+
+
+def test_heartbeat_merges_live_probe_and_survives_its_errors(tmp_path: Path) -> None:
+    Heartbeat(tmp_path, "slack", probe=lambda: {"slack": {"connected": True}}).beat()
+    beat = read_json(tmp_path / HEARTBEAT_FILE)
+    assert beat is not None
+    assert beat["slack"] == {"connected": True}
+
+    def broken() -> dict[str, object]:
+        raise RuntimeError("client gone")
+
+    Heartbeat(tmp_path, "slack", probe=broken).beat()  # still beats: the process is alive
+    beat = read_json(tmp_path / HEARTBEAT_FILE)
+    assert beat is not None
+    assert "slack" not in beat
+
+
+@pytest.mark.parametrize(
+    ("slack", "health", "expected"),
+    [
+        ({"connected": True, "drops_10m": 1}, "running", "connected"),
+        ({"connected": True, "drops_10m": 25}, "running", "unstable"),  # a reconnect loop
+        ({"connected": True, "drops_10m": 0, "errors_10m": 54}, "running", "unstable"),  # no closes
+        ({"connected": False, "drops_10m": 0}, "running", "disconnected"),
+        ({"connected": True}, "not responding", "unknown"),  # stale beat: can't tell
+        (None, "running", "unknown"),  # HTTP mode or an older bot
+    ],
+)
+def test_slack_health(slack: dict[str, object] | None, health: str, expected: str) -> None:
+    heartbeat = {"slack": slack} if slack is not None else {}
+    assert slack_health_of(heartbeat, health) == expected  # type: ignore[arg-type]
+
+
+def test_bots_page_warns_about_an_unstable_slack_connection(tmp_path: Path) -> None:
+    data_dir = make_bot_env(tmp_path, "hr")
+    slack = {"connected": True, "drops_10m": 40, "errors_10m": 40, "last_error": "BrokenPipeError"}
+    Heartbeat(data_dir, "slack", probe=lambda: {"slack": slack}).beat()
+    at = AppTest.from_file(APP, default_timeout=30).run()
+    assert not at.exception
+    (warning,) = at.warning
+    assert "**unstable**" in warning.value
+    assert "BrokenPipeError" in warning.value
+
+
+def test_bots_page_shows_a_healthy_slack_connection(tmp_path: Path) -> None:
+    data_dir = make_bot_env(tmp_path, "hr")
+    slack = {"connected": True, "drops_10m": 0, "errors_10m": 0}
+    Heartbeat(data_dir, "slack", probe=lambda: {"slack": slack}).beat()
+    at = AppTest.from_file(APP, default_timeout=30).run()
+    assert not at.warning
+    assert any("**connected**" in m.value for m in at.markdown)
+
+
+def test_bots_page_shows_recent_slack_restarts(tmp_path: Path) -> None:
+    data_dir = make_bot_env(tmp_path, "hr")
+    Heartbeat(data_dir, "slack", probe=lambda: {"slack": {"connected": True}}).beat()
+    record_activity(data_dir, {"kind": "question", "outcome": "answered"})
+    record_activity(data_dir, {"kind": "slack_restart", "action": "reconnect", "reason": "x"})
+    reason = "12 drops in 10 min, last error BrokenPipeError"
+    record_activity(data_dir, {"kind": "slack_restart", "action": "restart", "reason": reason})
+    bot = overview("hr")
+    assert [e["action"] for e in bot.slack_restarts] == ["restart", "reconnect"]
+    assert bot.last_24h.questions == 1
+    at = AppTest.from_file(APP, default_timeout=30).run()
+    assert not at.exception
+    (line,) = [c.value for c in at.caption if "Slack watchdog" in c.value]
+    assert "1 reconnects, 1 restarts" in line
+    assert "BrokenPipeError" in line
