@@ -32,6 +32,12 @@ DEFAULT_BOT = "(default)"
 """The knowledge base configured by .env alone, when no bots/<name>.env files exist."""
 
 Health = Literal["running", "not responding", "stopped", "never started"]
+SlackHealth = Literal["connected", "unstable", "disconnected", "unknown"]
+
+UNSTABLE_FAILURES = 3
+"""Connection drops or errors within the bot's 10-minute window that mark Slack as unstable.
+One drop is normal (Slack rotates connections); a reconnect loop fails every few seconds, and
+after a network blip it may report only errors, never a close."""
 
 
 @dataclass
@@ -73,6 +79,12 @@ class BotOverview:
     """Auto-sync cron: what the running bot reports, else its configuration."""
     next_sync: datetime | None = None
     last_24h: ActivityStats = field(default_factory=ActivityStats)
+    slack_restarts: list[dict[str, Any]] = field(default_factory=list)
+    """The Slack watchdog's reconnects and restarts in the last 24 h, newest first."""
+
+    @property
+    def slack_health(self) -> SlackHealth:
+        return slack_health_of(self.heartbeat, self.health)
 
     @property
     def syncing(self) -> bool:
@@ -116,6 +128,19 @@ def health_of(heartbeat: dict[str, Any] | None, now: datetime | None = None) -> 
     if updated is None or now - updated > timedelta(seconds=STALE_AFTER_SECONDS):
         return "not responding"
     return "running"
+
+
+def slack_health_of(heartbeat: dict[str, Any] | None, health: Health) -> SlackHealth:
+    """The Slack connection as the running bot last reported it ("unknown" if it doesn't)."""
+    slack = (heartbeat or {}).get("slack")
+    if health != "running" or not isinstance(slack, dict):
+        return "unknown"
+    if not slack.get("connected"):
+        return "disconnected"
+    failures = max(int(slack.get("drops_10m") or 0), int(slack.get("errors_10m") or 0))
+    if failures >= UNSTABLE_FAILURES:
+        return "unstable"
+    return "connected"
 
 
 def read_index_state(settings: Settings) -> IndexState:
@@ -169,6 +194,14 @@ def activity_stats(events: list[dict[str, Any]], since: datetime) -> ActivitySta
     )
 
 
+def slack_restarts(events: list[dict[str, Any]], since: datetime) -> list[dict[str, Any]]:
+    return [
+        e
+        for e in reversed(events)
+        if e.get("kind") == "slack_restart" and (parse_time(e.get("at")) or since) > since
+    ]
+
+
 def overview(name: str, bots_dir: Path = BOTS_DIR, now: datetime | None = None) -> BotOverview:
     result = BotOverview(name=name)
     try:
@@ -188,9 +221,9 @@ def overview(name: str, bots_dir: Path = BOTS_DIR, now: datetime | None = None) 
     result.schedule = schedule if isinstance(schedule, str) and schedule else None
     if result.schedule:
         result.next_sync = next_due(result.schedule, result.index.last_sync)
-    result.last_24h = activity_stats(
-        read_activity(settings.data_dir), since=now - timedelta(hours=24)
-    )
+    events, day_ago = read_activity(settings.data_dir), now - timedelta(hours=24)
+    result.last_24h = activity_stats(events, since=day_ago)
+    result.slack_restarts = slack_restarts(events, since=day_ago)
     return result
 
 

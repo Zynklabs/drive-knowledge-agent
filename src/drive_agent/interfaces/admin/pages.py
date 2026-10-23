@@ -33,6 +33,7 @@ HEALTH_ICONS = {
     "stopped": "🔴",
     "never started": "⚪",
 }
+SLACK_ICONS = {"connected": "🟢", "unstable": "🟠", "disconnected": "🔴"}
 
 
 def password_ok() -> bool:
@@ -90,6 +91,7 @@ def render_bot(bot: BotOverview) -> None:
             details.append(f"last seen {when(parse_time(hb.get('updated_at')))}")
         details.append(f"`{settings.interfaces.slack.command}`")
         st.markdown(" · ".join(details))
+        render_slack(bot)
 
         index, total = bot.index, bot.total_files
         a, b, c, d = st.columns(4)
@@ -134,6 +136,45 @@ def render_bot(bot: BotOverview) -> None:
                 f"avg {stats.avg_seconds} s per answer"
             )
         render_sync(bot.sync)
+
+
+def render_slack(bot: BotOverview) -> None:
+    """The Slack connection: the process can be up while Slack keeps dropping it."""
+    render_slack_restarts(bot.slack_restarts)
+    state = bot.slack_health
+    if state == "unknown":
+        return
+    slack = (bot.heartbeat or {}).get("slack") or {}
+    drops, errors = slack.get("drops_10m", 0), slack.get("errors_10m", 0)
+    last_message = when(parse_time(slack.get("last_message_at")))
+    line = f"Slack {SLACK_ICONS[state]} **{state}**"
+    if state == "connected":
+        line += f" since {when(parse_time(slack.get('connected_since')))}"
+    line += f" · {drops} drops, {errors} errors in 10 min · last message from Slack {last_message}"
+    if state == "connected":
+        st.markdown(line)
+        return
+    hint = (
+        "It keeps reconnecting, so messages may not reach the bot. If this lasts, restart it."
+        if state == "unstable"
+        else "Messages are not reaching the bot. If this lasts, restart it."
+    )
+    if slack.get("last_error"):
+        line += f" · last error `{slack['last_error']}`"
+    st.warning(f"{line}\n\n{hint}")
+
+
+def render_slack_restarts(restarts: list[dict[str, Any]]) -> None:
+    """What the bot's Slack watchdog did about a stuck connection in the last 24 h."""
+    if not restarts:
+        return
+    exits = sum(1 for e in restarts if e.get("action") == "restart")
+    count = f"{len(restarts) - exits} reconnects, {exits} restarts"
+    last = restarts[0]
+    st.caption(
+        f"Slack watchdog, 24 h: {count} · last {last.get('action')} "
+        f"{when(parse_time(last.get('at')))} ({last.get('reason') or 'no reason given'})"
+    )
 
 
 def render_sync(sync: dict[str, Any] | None) -> None:
@@ -183,7 +224,9 @@ def activity_page() -> None:
     except ConfigError as exc:
         st.error(str(exc))
         return
-    events = [e for e in read_activity(settings.data_dir, limit=2000) if e.get("kind")]
+    events = [
+        e for e in read_activity(settings.data_dir, limit=2000) if e.get("kind") == "question"
+    ]
     if not events:
         st.info("No questions yet. Each question a bot answers shows up here.")
         return

@@ -14,6 +14,7 @@ import json
 import os
 import threading
 from collections import deque
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -59,9 +60,12 @@ class Heartbeat:
         interface: str,
         *,
         details: dict[str, Any] | None = None,
+        probe: Callable[[], dict[str, Any]] | None = None,
         every: float = HEARTBEAT_SECONDS,
     ) -> None:
         self._path = data_dir / HEARTBEAT_FILE
+        self._probe = probe
+        """Live status merged into every beat (e.g. the Slack connection); errors are ignored."""
         self._every = every
         self._stop = threading.Event()
         self._info = {
@@ -78,7 +82,11 @@ class Heartbeat:
         return self
 
     def beat(self) -> None:
-        write_json(self._path, {**self._info, "updated_at": now_iso()})
+        live: dict[str, Any] = {}
+        if self._probe is not None:
+            with contextlib.suppress(Exception):
+                live = self._probe()
+        write_json(self._path, {**self._info, **live, "updated_at": now_iso()})
 
     def stop(self) -> None:
         self._stop.set()

@@ -82,6 +82,9 @@ ENV_ALIASES: dict[str, str] = {
     "SLACK_ALLOW_DMS": "interfaces.slack.allow_dms",
     "SLACK_COMMAND": "interfaces.slack.command",
     "SLACK_LOG_QUESTIONS": "interfaces.slack.log_questions",
+    "SLACK_WATCHDOG": "interfaces.slack.watchdog",
+    "SLACK_WATCHDOG_FAILURES": "interfaces.slack.watchdog_failures",
+    "SLACK_WATCHDOG_GRACE_SECONDS": "interfaces.slack.watchdog_grace_seconds",
     "LOG_DIR": "admin.log_dir",
 }
 
@@ -260,6 +263,15 @@ class SlackSettings(_Section):
     """Slash command; give each bot in a workspace its own (e.g. /drive-hr)."""
     log_questions: bool = False
     """Include question text in the activity log the admin portal shows (off: metadata only)."""
+    watchdog: bool = True
+    """Socket Mode: recover a connection stuck reconnecting, first with a fresh client, then by
+    exiting non-zero so the service manager restarts the bot (never during a sync)."""
+    watchdog_failures: int = Field(default=10, ge=0)
+    """Connection drops or errors within 10 minutes that count as stuck; 0 = only an outright
+    disconnect. Slack rotates a healthy connection every few hours; a reconnect loop fails every
+    few seconds."""
+    watchdog_grace_seconds: int = Field(default=120, ge=0)
+    """How long the connection may stay stuck or disconnected before the watchdog acts."""
 
     _split_lists = field_validator("allowed_channels", "admin_users", mode="before")(_split_csv)
 
