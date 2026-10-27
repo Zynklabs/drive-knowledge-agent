@@ -7,7 +7,13 @@ import io
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
-from drive_agent.parsing.models import ParsedDocument, ParseError, Section, normalize_text
+from drive_agent.parsing.models import (
+    MAX_TEXT_CHARS,
+    ParsedDocument,
+    ParseError,
+    Section,
+    normalize_text,
+)
 
 # Bullet glyphs: • ● ○ ◦ ▪ ▫ ■ □ ‣ hyphen-bullet ► ▶ ➢ ✓ ✔
 _BULLETS = frozenset(
@@ -62,10 +68,15 @@ def parse_pdf(data: bytes) -> ParsedDocument:
 
     doc = ParsedDocument()
     empty = 0
+    chars = 0
     for number, page in enumerate(pages, start=1):
+        if chars > MAX_TEXT_CHARS:
+            doc.warnings.append(f"text limit reached; pages {number}-{len(pages)} not indexed")
+            break
         text = normalize_text(join_fragments(page.extract_text() or ""))
         if text:
             doc.sections.append(Section(text, page=number))
+            chars += len(text)
         else:
             empty += 1
 

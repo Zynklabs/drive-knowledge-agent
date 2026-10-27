@@ -7,7 +7,6 @@ loads no model and never touches a bot's index.
 
 from __future__ import annotations
 
-import hmac
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -15,7 +14,7 @@ from typing import Any
 import streamlit as st
 
 from drive_agent.core.config import ConfigError, load_settings
-from drive_agent.core.monitor import read_activity
+from drive_agent.core.monitor import read_activity, read_sync_history
 from drive_agent.interfaces.admin.data import (
     BotOverview,
     bot_names,
@@ -25,6 +24,7 @@ from drive_agent.interfaces.admin.data import (
     parse_time,
     tail,
 )
+from drive_agent.interfaces.login import GATE, MESSAGES
 
 REFRESH = "10s"
 HEALTH_ICONS = {
@@ -47,11 +47,13 @@ def password_ok() -> bool:
         return True
     st.title("Drive Agent admin")
     attempt = st.text_input("Password", type="password")
-    if attempt and hmac.compare_digest(attempt.encode(), secret.get_secret_value().encode()):
+    if not attempt:
+        return False
+    outcome = GATE.check(attempt, secret)
+    if outcome == "ok":
         st.session_state.admin_ok = True
         st.rerun()
-    elif attempt:
-        st.error("Wrong password.")
+    st.error(MESSAGES[outcome])
     return False
 
 
@@ -250,6 +252,68 @@ def activity_page() -> None:
             del row["question"]
         st.caption("Question text is not recorded. Set SLACK_LOG_QUESTIONS=true to include it.")
     st.dataframe(rows, hide_index=True, use_container_width=True)
+
+
+TRIGGERS = {"schedule": "auto", "slack": "Slack", "web": "web app", "cli": "CLI"}
+
+
+def _local(value: Any) -> str:
+    moment = parse_time(value)
+    return moment.astimezone().strftime("%d %b %H:%M") if moment else ""
+
+
+def _took(sync: dict[str, Any]) -> str:
+    started, finished = parse_time(sync.get("started_at")), parse_time(sync.get("finished_at"))
+    if started is None or finished is None:
+        return ""
+    minutes, seconds = divmod(round((finished - started).total_seconds()), 60)
+    return f"{minutes} min {seconds:02d} s" if minutes else f"{seconds} s"
+
+
+def sync_rows(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One table row per finished sync, newest first."""
+    rows = []
+    for sync in reversed(history):
+        result = (
+            "✅ done" if sync.get("state") == "done" else "❌ " + str(sync.get("error", "failed"))
+        )
+        rows.append(
+            {
+                "started": _local(sync.get("started_at")),
+                "trigger": TRIGGERS.get(sync.get("trigger", ""), sync.get("trigger", "")),
+                "result": result + (" · full rebuild" if sync.get("full") else ""),
+                "new files": sync.get("new_files"),
+                "updated files": sync.get("changed_files"),
+                "removed files": sync.get("removed_files"),
+                "failed files": sync.get("files_failed"),
+                "files in folder": sync.get("files_total"),
+                "chunks added": sync.get("chunks_added"),
+                "took": _took(sync),
+            }
+        )
+    return rows
+
+
+def syncs_page() -> None:
+    st.title("Syncs")
+    name = st.selectbox("Bot", bot_names())
+    try:
+        settings = bot_settings(name)
+    except ConfigError as exc:
+        st.error(str(exc))
+        return
+    history = read_sync_history(settings.data_dir)
+    if not history:
+        st.info(
+            "No syncs recorded yet. Each sync, automatic or manual, shows up here when it ends."
+        )
+        return
+    st.caption(
+        "New files: indexed for the first time (all of them after a full rebuild). "
+        "Updated: changed in Drive. "
+        "Removed: deleted from Drive, so dropped from the index."
+    )
+    st.dataframe(sync_rows(history), hide_index=True, use_container_width=True)
 
 
 def logs_page() -> None:

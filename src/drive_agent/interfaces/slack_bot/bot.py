@@ -14,7 +14,7 @@ import logging
 import threading
 import time
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +22,7 @@ from typing import Any
 
 from drive_agent.core.agent import AgentReply, DriveAgent
 from drive_agent.core.config import ConfigError, SlackSettings
+from drive_agent.graph.safety import safe_answer
 from drive_agent.interfaces.slack_bot.formatting import (
     FEEDBACK_DOWN,
     FEEDBACK_UP,
@@ -43,6 +44,13 @@ NOT_IN_CHANNEL = (
     "then ask again."
 )
 DMS_OFF = "Direct messages are turned off. Ask me in a channel I've been added to."
+FAILED = ":warning: I couldn't answer that right now. An admin can see why in the bot's logs."
+"""Shown instead of the error itself, which can name providers, models or settings."""
+RATE_LIMITED = (
+    ":hourglass_flowing_sand: You've reached this bot's limit of {limit} questions an hour. "
+    "Please try again a little later."
+)
+HOUR = 3600.0
 
 
 def help_text(command: str = "/drive-agent", *, allow_dms: bool = False) -> str:
@@ -83,6 +91,7 @@ class SlackBot:
         self._interval = update_interval
         self._clock = clock
         self._seen: OrderedDict[str, None] = OrderedDict()
+        self._asked: dict[str, deque[float]] = {}
         self._lock = threading.Lock()
 
     @property
@@ -102,6 +111,25 @@ class SlackBot:
             if len(self._seen) > SEEN_EVENTS:
                 self._seen.popitem(last=False)
         return False
+
+    def _over_limit(self, user: str | None) -> str | None:
+        """The refusal when ``user`` has used up their questions for the hour, else None.
+
+        Counts this question when it is allowed. Uses the real clock: the injectable one
+        only paces streaming updates.
+        """
+        limit = self._settings.questions_per_hour
+        if not limit or not user:
+            return None
+        now = time.monotonic()
+        with self._lock:
+            asked = self._asked.setdefault(user, deque())
+            while asked and now - asked[0] >= HOUR:
+                asked.popleft()
+            if len(asked) >= limit:
+                return RATE_LIMITED.format(limit=limit)
+            asked.append(now)
+        return None
 
     def _help(self) -> str:
         return help_text(self.command, allow_dms=self._settings.allow_dms)
@@ -208,7 +236,17 @@ class SlackBot:
         user: str | None = None,
         via: str = "mention",
     ) -> None:
-        placeholder = client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=SEARCHING)
+        refusal = self._over_limit(user)
+        if refusal is not None:
+            client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=refusal)
+            return
+        placeholder = client.chat_postMessage(
+            channel=channel,
+            thread_ts=thread_ts,
+            text=SEARCHING,
+            unfurl_links=False,
+            unfurl_media=False,
+        )
         ts = placeholder["ts"]
         streamed: list[str] = []
         last_update = self._clock()
@@ -219,7 +257,8 @@ class SlackBot:
             now = self._clock()
             if now - last_update >= self._interval:  # stay well inside chat.update rate limits
                 last_update = now
-                partial = to_mrkdwn("".join(streamed))[:SECTION_LIMIT]
+                # Links are checked against the sources only once the answer is complete.
+                partial = to_mrkdwn(safe_answer("".join(streamed)))[:SECTION_LIMIT]
                 client.chat_update(channel=channel, ts=ts, text=partial + " …")
 
         thread_id = f"slack:{channel}:{thread_ts}"
@@ -228,13 +267,12 @@ class SlackBot:
                 question, thread_id, via=via, user=user, channel=channel, on_text=on_text
             )
         except (LLMError, ConfigError) as exc:
-            client.chat_update(channel=channel, ts=ts, text=f":warning: {exc}")
+            log.warning("answering failed: %s", exc)
+            client.chat_update(channel=channel, ts=ts, text=FAILED)
             return
         except Exception:
-            log.exception("answering %r failed", question)
-            client.chat_update(
-                channel=channel, ts=ts, text=":warning: Something went wrong; see the bot's logs."
-            )
+            self._log_failure(question)
+            client.chat_update(channel=channel, ts=ts, text=FAILED)
             return
         client.chat_update(
             channel=channel,
@@ -242,6 +280,13 @@ class SlackBot:
             text=fallback_text(reply.answer),
             blocks=reply_blocks(reply, feedback_value=thread_id),
         )
+
+    def _log_failure(self, question: str) -> None:
+        # Questions can be sensitive; they reach the logs only when question logging is on.
+        if self._settings.log_questions:
+            log.exception("answering %r failed", question)
+        else:
+            log.exception("answering a question failed")
 
     # --- slash command ------------------------------------------------------
 
@@ -273,7 +318,9 @@ class SlackBot:
             if not question:
                 respond(text=f"Usage: `{self.command} ask <question>`", response_type="ephemeral")
                 return
-            refusal = self._command_allowed(command, client)
+            refusal = self._over_limit(command.get("user_id")) or self._command_allowed(
+                command, client
+            )
             if refusal is not None:
                 respond(text=refusal, response_type="ephemeral")
                 return
@@ -293,7 +340,8 @@ class SlackBot:
                 channel=command.get("channel_id"),
             )
         except (LLMError, ConfigError) as exc:
-            respond(text=f":warning: {exc}", response_type="ephemeral")
+            log.warning("answering failed: %s", exc)
+            respond(text=FAILED, response_type="ephemeral")
             return
         respond(
             text=fallback_text(reply.answer),

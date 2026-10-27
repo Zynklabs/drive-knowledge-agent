@@ -269,12 +269,24 @@ def test_cli_ui_launches_streamlit(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cmd[cmd.index("--server.headless") + 1] == "false"
 
 
-def test_cli_ui_warns_when_exposed_without_password(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_ui_refuses_public_bind_without_password(monkeypatch: pytest.MonkeyPatch) -> None:
     import subprocess
 
+    calls: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "call", lambda cmd, env: calls.append(cmd) or 0)
+    result = CliRunner().invoke(cli_app, ["ui", "--host", "0.0.0.0"])  # noqa: S104
+    assert result.exit_code == 2
+    assert "Set UI_PASSWORD" in result.output
+    assert calls == []  # never started
+
+
+def test_cli_ui_serves_publicly_with_a_password(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    monkeypatch.setenv("UI_PASSWORD", "secret")
     monkeypatch.setattr(subprocess, "call", lambda cmd, env: 0)
     result = CliRunner().invoke(cli_app, ["ui", "--host", "0.0.0.0"])  # noqa: S104
-    assert "without UI_PASSWORD" in result.output
+    assert result.exit_code == 0
 
 
 def test_short_time() -> None:

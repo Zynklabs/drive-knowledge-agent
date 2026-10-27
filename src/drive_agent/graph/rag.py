@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from drive_agent.core.config import RetrievalSettings
 from drive_agent.graph import prompts
+from drive_agent.graph.safety import as_data, safe_answer
 from drive_agent.llm import LLM
 
 Retriever = Callable[[str, int], list[Document]]
@@ -76,12 +77,13 @@ def _emit(text: str) -> None:
 
 
 def _format_history(history: list[Turn]) -> str:
-    return "\n".join(f"{turn['role']}: {turn['content']}" for turn in history)
+    return "\n".join(f"{turn['role']}: {as_data(turn['content'])}" for turn in history)
 
 
 def _format_sources(sources: list[Source]) -> str:
     return "\n\n".join(
-        f'<source id="{n}">\n{source["text"]}\n</source>' for n, source in enumerate(sources, 1)
+        f'<source id="{n}">\n{as_data(source["text"])}\n</source>'
+        for n, source in enumerate(sources, 1)
     )
 
 
@@ -133,7 +135,7 @@ def build_rag_graph(
         if not sources or not retrieval.grade:
             return {"sources": sources[: retrieval.final_k], "attempts": attempts}
         prompt = f"Question: {state['question']}\n\n" + "\n\n".join(
-            f'<passage n="{n}">\n{s["text"]}\n</passage>' for n, s in enumerate(sources, 1)
+            f'<passage n="{n}">\n{as_data(s["text"])}\n</passage>' for n, s in enumerate(sources, 1)
         )
         keep = set(llm.structured(prompts.GRADE_SYSTEM, prompt, Relevant).passages)
         kept = [s for n, s in enumerate(sources, 1) if n in keep]
@@ -171,9 +173,12 @@ def build_rag_graph(
         return {"answer": prompts.NOT_FOUND, "status": "not_found", "sources": []}
 
     def cite(state: RAGState) -> dict[str, Any]:
-        answer = state["answer"]
+        sources = state.get("sources", [])
+        drive_links = {url for s in sources if (url := s["metadata"].get("web_url"))}
+        answer = safe_answer(state["answer"], drive_links)
         return {
-            "citations": parse_citations(answer, state.get("sources", [])),
+            "answer": answer,
+            "citations": parse_citations(answer, sources),
             "history": [
                 {"role": "user", "content": state["question"]},
                 {"role": "assistant", "content": answer},

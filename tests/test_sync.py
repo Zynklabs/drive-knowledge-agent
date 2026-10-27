@@ -8,7 +8,7 @@ import pytest
 from langchain_core.embeddings import DeterministicFakeEmbedding
 
 from drive_agent.core.config import Settings
-from drive_agent.core.monitor import SYNC_PROGRESS_FILE, read_json
+from drive_agent.core.monitor import SYNC_PROGRESS_FILE, read_json, read_sync_history
 from drive_agent.drive.fetcher import DriveFetcher
 from drive_agent.indexing import sync as sync_module
 from drive_agent.indexing.state import SQLiteRecordManager
@@ -123,6 +123,27 @@ def test_sync_progress_is_recorded(env: Env) -> None:
     assert progress["files_total"] == 2
     last = env.records.get_meta("last_sync")
     assert (last["total_files"], last["empty"], last["skipped"]) == (2, 0, 0)
+
+
+def test_each_sync_is_added_to_the_history(env: Env) -> None:
+    env.sync(trigger="schedule")
+    env.drive.items["doc"]["md5Checksum"] = "v2"
+    env.drive.contents["doc"] = b"# Stages\n\nTwo onsite rounds now."
+    env.drive.items["new"] = file("new", "Notes", DOC, "root", md5Checksum="n1")
+    env.drive.contents["new"] = b"# Notes\n\nNew file."
+    del env.drive.items["cv"]
+    env.sync()
+
+    first, second = read_sync_history(env.settings.data_dir)
+    assert (first["trigger"], first["state"], first["new_files"], first["changed_files"]) == (
+        "schedule",
+        "done",
+        2,
+        0,
+    )
+    assert (second["trigger"], second["new_files"], second["changed_files"]) == ("manual", 1, 1)
+    assert (second["removed_files"], second["files_total"]) == (1, 2)
+    assert "pid" not in second
 
 
 def test_interrupted_sync_is_recorded_as_failed(env: Env) -> None:

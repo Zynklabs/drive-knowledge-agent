@@ -233,6 +233,12 @@ def logs() -> None:
     logs_page()
 
 
+def syncs() -> None:
+    from drive_agent.interfaces.admin.pages import syncs_page
+
+    syncs_page()
+
+
 @pytest.fixture
 def portal_files(tmp_path: Path) -> Path:
     data_dir = make_bot_env(tmp_path, "hr")
@@ -354,3 +360,26 @@ def test_bots_page_shows_recent_slack_restarts(tmp_path: Path) -> None:
     (line,) = [c.value for c in at.caption if "Slack watchdog" in c.value]
     assert "1 reconnects, 1 restarts" in line
     assert "BrokenPipeError" in line
+
+
+def test_syncs_page_lists_each_sync_newest_first(portal_files: Path) -> None:
+    first = SyncProgress(portal_files, trigger="schedule")
+    first.listed(3)
+    first.finish(ok=True, files={"new_files": 3, "changed_files": 0, "removed_files": 0})
+    second = SyncProgress(portal_files, trigger="slack")
+    second.finish(ok=False, error="Drive API error")
+
+    at = AppTest.from_function(syncs).run()
+    assert not at.exception
+    table = at.dataframe[0].value
+    assert list(table["trigger"]) == ["Slack", "auto"]
+    assert list(table["new files"].fillna(-1)) == [-1, 3]
+    assert table["result"][0] == "❌ Drive API error"
+    assert table["files in folder"][1] == 3
+
+
+@pytest.mark.usefixtures("portal_files")
+def test_syncs_page_before_any_sync() -> None:
+    at = AppTest.from_function(syncs).run()
+    assert not at.exception
+    assert "No syncs recorded yet" in at.info[0].value

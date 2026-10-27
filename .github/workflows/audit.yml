@@ -1,0 +1,23 @@
+name: Dependency audit
+
+on:
+  push:
+    branches: [main]
+    paths: [uv.lock, pyproject.toml]
+  pull_request:
+    paths: [uv.lock, pyproject.toml]
+  schedule:
+    - cron: "0 6 * * 1"  # Mondays, so new advisories for locked versions show up
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: uv export --frozen --all-extras --no-hashes --no-emit-project > requirements.txt
+      - run: uvx pip-audit -r requirements.txt --disable-pip --no-deps

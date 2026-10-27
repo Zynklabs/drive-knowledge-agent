@@ -102,7 +102,7 @@ def test_coordinator_runs_one_sync_at_a_time() -> None:
     worker.join(5)
     assert not coordinator.running
     assert coordinator.run("web", full=True).added == 1
-    assert fn.calls[-1] == {"full": True, "on_file": None}
+    assert fn.calls[-1] == {"full": True, "on_file": None, "trigger": "web"}
     assert coordinator.last_report is not None
 
 

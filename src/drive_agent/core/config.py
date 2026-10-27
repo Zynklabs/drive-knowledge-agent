@@ -82,6 +82,7 @@ ENV_ALIASES: dict[str, str] = {
     "SLACK_ALLOW_DMS": "interfaces.slack.allow_dms",
     "SLACK_COMMAND": "interfaces.slack.command",
     "SLACK_LOG_QUESTIONS": "interfaces.slack.log_questions",
+    "SLACK_QUESTIONS_PER_HOUR": "interfaces.slack.questions_per_hour",
     "SLACK_WATCHDOG": "interfaces.slack.watchdog",
     "SLACK_WATCHDOG_FAILURES": "interfaces.slack.watchdog_failures",
     "SLACK_WATCHDOG_GRACE_SECONDS": "interfaces.slack.watchdog_grace_seconds",
@@ -263,6 +264,8 @@ class SlackSettings(_Section):
     """Slash command; give each bot in a workspace its own (e.g. /drive-hr)."""
     log_questions: bool = False
     """Include question text in the activity log the admin portal shows (off: metadata only)."""
+    questions_per_hour: int = Field(default=30, ge=0)
+    """Questions one person may ask per hour (each costs LLM calls); 0 = no limit."""
     watchdog: bool = True
     """Socket Mode: recover a connection stuck reconnecting, first with a fresh client, then by
     exiting non-zero so the service manager restarts the bot (never during a sync)."""

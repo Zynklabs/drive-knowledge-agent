@@ -20,8 +20,10 @@ from drive_agent.interfaces.slack_bot import bot as bot_module
 from drive_agent.interfaces.slack_bot import formatting, runner
 from drive_agent.interfaces.slack_bot.bot import (
     DMS_OFF,
+    FAILED,
     HELP,
     NOT_IN_CHANNEL,
+    RATE_LIMITED,
     SEARCHING,
     SlackBot,
     register,
@@ -129,7 +131,15 @@ def test_mention_answers_in_thread_with_blocks(tmp_path: Path) -> None:
     agent, client = FakeAgent(), FakeClient()
     make_bot(tmp_path, agent).handle_mention(mention(), client)
 
-    assert client.posts == [{"channel": "C1", "thread_ts": "100.1", "text": SEARCHING}]
+    assert client.posts == [
+        {
+            "channel": "C1",
+            "thread_ts": "100.1",
+            "text": SEARCHING,
+            "unfurl_links": False,
+            "unfurl_media": False,
+        }
+    ]
     assert agent.calls == [("who knows Go?", "slack:C1:100.1")]
     final = client.updates[-1]
     assert final["ts"] == "999.000"
@@ -204,14 +214,69 @@ def test_streaming_updates_are_throttled(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
-        (LLMError("No Claude credentials found."), ":warning: No Claude credentials found."),
-        (RuntimeError("boom"), ":warning: Something went wrong; see the bot's logs."),
+        (LLMError("No Claude credentials found."), FAILED),
+        (RuntimeError("boom"), FAILED),
     ],
 )
 def test_errors_replace_the_placeholder(tmp_path: Path, error: Exception, expected: str) -> None:
     client = FakeClient()
     make_bot(tmp_path, FakeAgent(error=error)).handle_mention(mention(), client)
     assert client.updates == [{"channel": "C1", "ts": "999.000", "text": expected}]
+
+
+def test_failures_keep_the_question_out_of_logs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    make_bot(tmp_path, FakeAgent(error=RuntimeError("boom"))).handle_mention(
+        mention(), FakeClient()
+    )
+    assert "answering a question failed" in caplog.text
+    assert "who knows Go" not in caplog.text
+    caplog.clear()
+    make_bot(tmp_path, FakeAgent(error=RuntimeError("boom")), log_questions=True).handle_mention(
+        mention(), FakeClient()
+    )
+    assert "who knows Go" in caplog.text
+
+
+def test_streamed_partials_drop_links_and_images(tmp_path: Path) -> None:
+    class LinkAgent(FakeAgent):
+        def ask(self, question: str, **kwargs: Any) -> AgentReply:
+            kwargs["on_text"]("See [this](https://evil.example) ![x](https://evil.example/p.png)")
+            kwargs["on_text"](" now.")
+            return self.reply
+
+    ticks = iter([0.0, 2.0, 4.0])
+    client = FakeClient()
+    make_bot(tmp_path, LinkAgent(), clock=lambda: next(ticks)).handle_mention(mention(), client)
+    assert "evil.example" not in client.updates[0]["text"]
+
+
+def test_questions_per_hour_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [1000.0]
+    monkeypatch.setattr("drive_agent.interfaces.slack_bot.bot.time.monotonic", lambda: now[0])
+    agent = FakeAgent()
+    bot = make_bot(tmp_path, agent, questions_per_hour=2)
+    for _ in range(3):
+        bot.handle_mention(mention(), FakeClient())
+    respond = Responder()
+    bot.handle_command(command("ask q"), respond, FakeClient())
+    assert len(agent.calls) == 2
+    assert respond.calls[0]["text"] == RATE_LIMITED.format(limit=2)
+    other = FakeClient()
+    bot.handle_mention(mention(user="U2"), other)  # the limit is per person
+    assert len(agent.calls) == 3
+    now[0] += 3600
+    bot.handle_mention(mention(), FakeClient())  # an hour later the window has moved on
+    assert len(agent.calls) == 4
+
+
+def test_no_questions_per_hour_limit(tmp_path: Path) -> None:
+    agent = FakeAgent()
+    bot = make_bot(tmp_path, agent, questions_per_hour=0)
+    for _ in range(40):
+        bot.handle_mention(mention(), FakeClient())
+    assert len(agent.calls) == 40
 
 
 def test_not_found_has_no_feedback_buttons(tmp_path: Path) -> None:
@@ -320,7 +385,7 @@ def test_command_usage_and_errors(tmp_path: Path) -> None:
     make_bot(tmp_path, FakeAgent(error=LLMError("rate limited"))).handle_command(
         command("ask q"), respond, FakeClient()
     )
-    assert respond.calls[0]["text"] == ":warning: rate limited"
+    assert respond.calls[0]["text"] == FAILED
 
 
 # --- feedback -----------------------------------------------------------------

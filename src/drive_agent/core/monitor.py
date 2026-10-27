@@ -2,7 +2,8 @@
 
 - ``heartbeat.json``: rewritten every few seconds while a long-running interface is up;
 - ``activity.jsonl``: one line per question answered (metadata; question text is opt-in);
-- ``sync_progress.json``: the current or last sync, updated as each file is indexed.
+- ``sync_progress.json``: the current or last sync, updated as each file is indexed;
+- ``sync_history.jsonl``: one line per finished sync (new, updated and removed files).
 
 Writers never raise: monitoring must not break answering or syncing.
 """
@@ -22,6 +23,7 @@ from typing import Any
 HEARTBEAT_FILE = "heartbeat.json"
 ACTIVITY_FILE = "activity.jsonl"
 SYNC_PROGRESS_FILE = "sync_progress.json"
+SYNC_HISTORY_FILE = "sync_history.jsonl"
 
 HEARTBEAT_SECONDS = 30
 STALE_AFTER_SECONDS = 3 * HEARTBEAT_SECONDS
@@ -97,18 +99,18 @@ class Heartbeat:
             self.beat()
 
 
-def record_activity(data_dir: Path, event: dict[str, Any]) -> None:
-    line = json.dumps({"at": now_iso(), **event}, ensure_ascii=False)
+def _append(path: Path, record: dict[str, Any]) -> None:
+    line = json.dumps(record, ensure_ascii=False)
     with _append_lock, contextlib.suppress(OSError):
-        data_dir.mkdir(parents=True, exist_ok=True)
-        with (data_dir / ACTIVITY_FILE).open("a", encoding="utf-8") as fh:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
 
 
-def read_activity(data_dir: Path, limit: int = 1000) -> list[dict[str, Any]]:
-    """The newest ``limit`` events, oldest first."""
+def _read_lines(path: Path, limit: int) -> list[dict[str, Any]]:
+    """The newest ``limit`` records, oldest first."""
     try:
-        with (data_dir / ACTIVITY_FILE).open(encoding="utf-8") as fh:
+        with path.open(encoding="utf-8") as fh:
             lines = deque(fh, maxlen=limit)
     except OSError:
         return []
@@ -121,15 +123,31 @@ def read_activity(data_dir: Path, limit: int = 1000) -> list[dict[str, Any]]:
     return events
 
 
+def record_activity(data_dir: Path, event: dict[str, Any]) -> None:
+    _append(data_dir / ACTIVITY_FILE, {"at": now_iso(), **event})
+
+
+def read_activity(data_dir: Path, limit: int = 1000) -> list[dict[str, Any]]:
+    """The newest ``limit`` events, oldest first."""
+    return _read_lines(data_dir / ACTIVITY_FILE, limit)
+
+
+def read_sync_history(data_dir: Path, limit: int = 500) -> list[dict[str, Any]]:
+    """The newest ``limit`` finished syncs, oldest first."""
+    return _read_lines(data_dir / SYNC_HISTORY_FILE, limit)
+
+
 class SyncProgress:
     """Keeps ``sync_progress.json`` current while a sync runs."""
 
-    def __init__(self, data_dir: Path, *, full: bool = False) -> None:
+    def __init__(self, data_dir: Path, *, full: bool = False, trigger: str = "manual") -> None:
         self._path = data_dir / SYNC_PROGRESS_FILE
+        self._history = data_dir / SYNC_HISTORY_FILE
         self.state: dict[str, Any] = {
             "state": "running",
             "pid": os.getpid(),
             "full": full,
+            "trigger": trigger,
             "started_at": now_iso(),
             "files_total": None,
             "files_done": 0,
@@ -151,11 +169,15 @@ class SyncProgress:
         self.state["chunks_added"] += chunks_added
         self._save()
 
-    def finish(self, *, ok: bool, error: str | None = None) -> None:
-        self.state.update(state="done" if ok else "failed", finished_at=now_iso())
+    def finish(
+        self, *, ok: bool, error: str | None = None, files: dict[str, int] | None = None
+    ) -> None:
+        """Record the outcome, plus ``files`` (new, updated, removed...) from the sync report."""
+        self.state.update(state="done" if ok else "failed", finished_at=now_iso(), **(files or {}))
         if error:
             self.state["error"] = error
         self._save()
+        _append(self._history, {k: v for k, v in self.state.items() if k != "pid"})
 
     def _save(self) -> None:
         write_json(self._path, {**self.state, "updated_at": now_iso()})
