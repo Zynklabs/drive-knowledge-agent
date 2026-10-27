@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import logging
 import os
@@ -71,6 +72,9 @@ def _version(value: bool) -> None:
         raise typer.Exit()
 
 
+PRIVATE_UMASK = 0o077
+
+
 @app.callback()
 def main(
     ctx: typer.Context,
@@ -106,15 +110,27 @@ def main(
                 f"Create it with `drive-agent bot add {bot} --folder <url>`."
             )
             raise typer.Exit(1)
+    # Conversations, activity, feedback and sync state hold questions and file names: keep
+    # everything this process creates readable by its owner only.
+    os.umask(PRIVATE_UMASK)
     ctx.obj = {"config": config, "env_file": env_file}
 
 
 def _settings(ctx: typer.Context) -> Settings:
     try:
-        return load_settings(ctx.obj["config"], extra_env_file=ctx.obj.get("env_file"))
+        settings = load_settings(ctx.obj["config"], extra_env_file=ctx.obj.get("env_file"))
     except ConfigError as exc:
         err_console.print(f"[red]Config error:[/red] {exc}")
         raise typer.Exit(1) from exc
+    _make_private(settings.data_dir)
+    return settings
+
+
+def _make_private(data_dir: Path) -> None:
+    """Close a data dir made by an older version (files 0644) to other local users."""
+    if data_dir.is_dir():
+        with contextlib.suppress(OSError):  # not ours, or a read-only mount: leave it
+            data_dir.chmod(0o700)
 
 
 def _not_implemented(command: str, milestone: str) -> None:
@@ -399,6 +415,7 @@ def sync(
                 full=full,
                 on_file=_file_progress(status, "Embedded"),
                 on_scan=_scan_progress(status),
+                trigger="cli",
             )
     except SyncError as exc:
         err_console.print(f"[red]Sync stopped:[/red] {exc}")
@@ -557,12 +574,15 @@ def _answer(agent: DriveAgent, question: str, thread: str | None) -> AgentReply:
     return reply
 
 
+LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
 @app.command()
 def ui(
     ctx: typer.Context,
     port: Annotated[int, typer.Option(help="Port to serve on.")] = 8501,
     host: Annotated[
-        str, typer.Option(help="Address to bind; use 0.0.0.0 only behind a password.")
+        str, typer.Option(help="Address to bind; anything beyond localhost needs UI_PASSWORD.")
     ] = "localhost",
     no_browser: Annotated[
         bool, typer.Option("--no-browser", help="Don't open a browser tab automatically.")
@@ -575,11 +595,12 @@ def ui(
             "[red]Streamlit is not installed.[/red] pip install 'drive-knowledge-agent[streamlit]'"
         )
         raise typer.Exit(1)
-    if host not in {"localhost", "127.0.0.1"} and settings.secrets.ui_password is None:
+    if host not in LOCAL_HOSTS and settings.secrets.ui_password is None:
         err_console.print(
-            "[yellow]⚠ Serving beyond localhost without UI_PASSWORD: anyone who can reach this "
-            "address can query your Drive index.[/yellow]"
+            "[red]Refusing to serve beyond localhost without a password.[/red] Set UI_PASSWORD: "
+            "anyone who can reach this address could query your Drive index and re-index it."
         )
+        raise typer.Exit(2)
 
     from drive_agent.interfaces import streamlit_app
 
@@ -625,9 +646,7 @@ def admin(
         )
         raise typer.Exit(1)
     secrets = settings.secrets
-    if host not in {"localhost", "127.0.0.1"} and not (
-        secrets.admin_password or secrets.ui_password
-    ):
+    if host not in LOCAL_HOSTS and not (secrets.admin_password or secrets.ui_password):
         err_console.print(
             "[red]Refusing to serve the admin portal beyond localhost without a password.[/red] "
             "Set ADMIN_PASSWORD (it shows logs and usage)."

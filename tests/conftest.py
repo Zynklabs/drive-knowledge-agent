@@ -1,4 +1,5 @@
 import json
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,17 @@ def offline_bm25(monkeypatch: pytest.MonkeyPatch) -> None:
     from .fakes import FakeSparse
 
     monkeypatch.setattr(qdrant, "_bm25", lambda settings: FakeSparse())
+
+
+@pytest.fixture(autouse=True)
+def restore_umask() -> Iterator[None]:
+    """CLI commands make the process umask private; don't let that leak into other tests."""
+    import os
+
+    previous = os.umask(0o022)
+    os.umask(previous)
+    yield
+    os.umask(previous)
 
 
 @pytest.fixture(autouse=True)

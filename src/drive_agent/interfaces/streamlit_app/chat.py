@@ -9,6 +9,7 @@ import streamlit as st
 
 from drive_agent.core.config import ConfigError
 from drive_agent.graph.rag import Citation, Source
+from drive_agent.graph.safety import safe_answer
 from drive_agent.interfaces.streamlit_app.resources import get_resources
 from drive_agent.llm import LLMError
 
@@ -99,7 +100,8 @@ def render_chat() -> None:
 
         def on_text(text: str) -> None:
             streamed.append(text)
-            placeholder.markdown(_md("".join(streamed)) + " ▌")
+            # Links are checked against the sources only once the answer is complete.
+            placeholder.markdown(_md(safe_answer("".join(streamed))) + " ▌")
 
         try:
             with st.spinner("Searching your Drive…"):

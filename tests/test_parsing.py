@@ -178,3 +178,21 @@ def test_join_pdf_fragments(raw: str, expected: str) -> None:
 def test_pdf_fragments_rejoined() -> None:
     doc = parse(make_pdf(["Skills\nPython\n&\nGo\n,\nRust"]), "pdf")
     assert doc.sections[0].text == "Skills\nPython & Go, Rust"
+
+
+def test_office_zip_bomb_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    from drive_agent.parsing import office
+
+    monkeypatch.setattr(office, "MAX_UNZIPPED_BYTES", 1000)
+    for fmt, data in (("docx", make_docx()), ("pptx", make_pptx())):
+        with pytest.raises(ParseError, match="too large once unzipped"):
+            parse(data, fmt)  # type: ignore[arg-type]
+
+
+def test_pdf_text_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    from drive_agent.parsing import pdf
+
+    monkeypatch.setattr(pdf, "MAX_TEXT_CHARS", 10)
+    doc = parse(make_pdf(["First page text.", "Second.", "Third."]), "pdf")
+    assert [s.page for s in doc.sections] == [1]
+    assert doc.warnings == ["text limit reached; pages 2-3 not indexed"]

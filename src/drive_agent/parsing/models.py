@@ -10,6 +10,12 @@ class ParseError(Exception):
     """The file could not be read (corrupt, password-protected, wrong format)."""
 
 
+MAX_TEXT_CHARS = 20_000_000
+"""Text kept from one file (roughly 10,000 pages); stops a crafted file from filling memory."""
+MAX_UNZIPPED_BYTES = 512 * 1024 * 1024
+"""Largest Word/PowerPoint file once unzipped; a small file can expand enormously (a zip bomb)."""
+
+
 @dataclass(frozen=True, slots=True)
 class Section:
     text: str

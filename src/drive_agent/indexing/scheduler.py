@@ -30,6 +30,7 @@ class SyncFn(Protocol):
         *,
         full: bool = ...,
         on_file: Callable[[FileResult], None] | None = ...,
+        trigger: str = ...,
     ) -> SyncReport: ...
 
 
@@ -63,7 +64,9 @@ class SyncCoordinator:
             raise SyncBusy
         try:
             log.info("sync started (%s)", trigger)
-            report = self._sync_fn(self._settings, self._index, full=full, on_file=on_file)
+            report = self._sync_fn(
+                self._settings, self._index, full=full, on_file=on_file, trigger=trigger
+            )
             self.last_report = report
             log.info("sync finished (%s): %s", trigger, summarize(report))
             return report

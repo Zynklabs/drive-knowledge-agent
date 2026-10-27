@@ -49,6 +49,10 @@ class SyncReport:
     deleted: int = 0
     """Stale chunks removed (changed files, files that vanished or no longer yield text)."""
     pruned_files: int = 0
+    new_files: int = 0
+    """Files loaded for the first time (every file, after a full rebuild)."""
+    changed_files: int = 0
+    """Files loaded again because they changed in Drive since the last sync."""
     prune_skipped: bool = False
     """True when a folder failed, so vanished-file pruning was skipped for safety."""
     healed: bool = False
@@ -170,8 +174,10 @@ def run_sync(
     full: bool = False,
     on_file: Callable[[FileResult], None] | None = None,
     on_scan: Progress | None = None,
+    trigger: str = "manual",
 ) -> SyncReport:
-    progress = SyncProgress(settings.data_dir, full=full)  # read by the admin portal
+    # Read by the admin portal, which also lists past syncs from what ``finish`` records.
+    progress = SyncProgress(settings.data_dir, full=full, trigger=trigger)
     try:
         report = _run_sync(
             service, settings, vector_index, records, progress, full, on_file, on_scan
@@ -183,8 +189,19 @@ def run_sync(
         progress.finish(ok=False, error="stopped")
         raise
     folder_errors = [load.error for load in report.folders if load.error]
-    progress.finish(ok=not folder_errors, error="; ".join(folder_errors) or None)
+    progress.finish(
+        ok=not folder_errors, error="; ".join(folder_errors) or None, files=_file_counts(report)
+    )
     return report
+
+
+def _file_counts(report: SyncReport) -> dict[str, int]:
+    return {
+        "new_files": report.new_files,
+        "changed_files": report.changed_files,
+        "removed_files": report.pruned_files,
+        "chunks_removed": report.deleted,
+    }
 
 
 def _run_sync(
@@ -235,6 +252,11 @@ def _run_sync(
         ):
             added_before = report.added
             version = file_version(loaded.file, settings.ingest)
+            if not loaded.unchanged and loaded.error is None:
+                if loaded.file.id in indexed:
+                    report.changed_files += 1
+                else:
+                    report.new_files += 1
             if loaded.unchanged:
                 if not indexed[loaded.file.id].empty:
                     _keep_unchanged(loaded.file, records, report)
@@ -299,6 +321,7 @@ def sync_now(
     full: bool = False,
     on_file: Callable[[FileResult], None] | None = None,
     on_scan: Progress | None = None,
+    trigger: str = "manual",
 ) -> SyncReport:
     """Connect to Drive (non-interactively) and run one sync. Used by the web app and Slack.
 
@@ -310,7 +333,14 @@ def sync_now(
     records = SQLiteRecordManager(vector_index.namespace, settings.data_dir / STATE_DB)
     try:
         return run_sync(
-            service, settings, vector_index, records, full=full, on_file=on_file, on_scan=on_scan
+            service,
+            settings,
+            vector_index,
+            records,
+            full=full,
+            on_file=on_file,
+            on_scan=on_scan,
+            trigger=trigger,
         )
     finally:
         records.close()

@@ -13,7 +13,13 @@ from docx.table import Table
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
-from drive_agent.parsing.models import ParsedDocument, ParseError, Section, normalize_text
+from drive_agent.parsing.models import (
+    MAX_UNZIPPED_BYTES,
+    ParsedDocument,
+    ParseError,
+    Section,
+    normalize_text,
+)
 
 _HEADING_STYLE = re.compile(r"^Heading (\d)$")
 
@@ -31,7 +37,22 @@ def _table_rows(table: Any) -> list[str]:
     return rows
 
 
+def _check_unzipped_size(data: bytes) -> None:
+    """Refuse an Office file whose parts unzip to more than ``MAX_UNZIPPED_BYTES``."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            size = sum(info.file_size for info in archive.infolist())
+    except zipfile.BadZipFile as exc:
+        raise ParseError(f"unreadable Office document: {exc}") from exc
+    if size > MAX_UNZIPPED_BYTES:
+        raise ParseError(
+            f"too large once unzipped ({size // (1024 * 1024)} MB; "
+            f"limit {MAX_UNZIPPED_BYTES // (1024 * 1024)} MB)"
+        )
+
+
 def parse_docx(data: bytes) -> ParsedDocument:
+    _check_unzipped_size(data)
     try:
         document = docx.Document(io.BytesIO(data))
     except (zipfile.BadZipFile, KeyError, ValueError) as exc:
@@ -73,6 +94,7 @@ def _iter_shapes(shapes: Any) -> Iterator[Any]:
 
 
 def parse_pptx(data: bytes) -> ParsedDocument:
+    _check_unzipped_size(data)
     try:
         presentation = Presentation(io.BytesIO(data))
     except (zipfile.BadZipFile, KeyError, ValueError) as exc:

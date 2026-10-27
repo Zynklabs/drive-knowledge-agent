@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -389,3 +390,11 @@ def test_ask_warns_when_index_is_overdue(
     assert result.exit_code == 0, result.output
     assert "scheduled sync is overdue" in " ".join(result.output.split())
     assert "Agent: Jane Doe knows Go [1]." in result.output
+
+
+def test_data_is_private_to_the_owner() -> None:
+    data_dir = Path(".drive-agent")
+    data_dir.mkdir(mode=0o755)
+    runner.invoke(app, ["status"])
+    assert data_dir.stat().st_mode & 0o777 == 0o700  # an older, readable dir is closed
+    assert os.umask(0o022) == cli.PRIVATE_UMASK  # files created from now on: owner only

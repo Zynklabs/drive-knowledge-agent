@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import hmac
-
 import streamlit as st
 
 from drive_agent.core.config import ConfigError, load_settings
+from drive_agent.interfaces.login import GATE, MESSAGES
 from drive_agent.interfaces.streamlit_app.chat import render_chat
 from drive_agent.interfaces.streamlit_app.index_page import render_index
 from drive_agent.interfaces.streamlit_app.setup_page import render_setup
@@ -22,11 +21,13 @@ def password_ok() -> bool:
         return True
     st.title("Drive Knowledge Agent")
     attempt = st.text_input("Password", type="password")
-    if attempt and hmac.compare_digest(attempt.encode(), secret.get_secret_value().encode()):
+    if not attempt:
+        return False
+    outcome = GATE.check(attempt, secret)
+    if outcome == "ok":
         st.session_state.authenticated = True
         st.rerun()
-    elif attempt:
-        st.error("Wrong password.")
+    st.error(MESSAGES[outcome])
     return False
 
 

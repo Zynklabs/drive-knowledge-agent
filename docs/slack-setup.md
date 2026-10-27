@@ -78,6 +78,7 @@ While the bot runs, it keeps its own index fresh: it re-syncs on `SYNC_SCHEDULE`
 |---|---|---|---|
 | `allowed_channels` | `SLACK_ALLOWED_CHANNELS` | empty = all | Channel IDs (e.g. `C0123ABC`) where the bot answers |
 | `allow_dms` | `SLACK_ALLOW_DMS` | `false` | Answer direct messages (see *Who can ask* below) |
+| `questions_per_hour` | `SLACK_QUESTIONS_PER_HOUR` | `30` | Questions one person may ask per hour; `0` = no limit. Also set a spend limit on your LLM API key |
 | `admin_users` | `SLACK_ADMIN_USERS` | empty = nobody | User IDs (e.g. `U0123ABC`) allowed to run `/drive-agent sync`; `*` = everyone |
 | `ingest.schedule_cron` | `SYNC_SCHEDULE` | `0 */6 * * *` | Auto-sync schedule (cron, UTC); `off` disables it |
 | `command` | `SLACK_COMMAND` | `/drive-agent` | The slash command; each bot in a workspace needs its own |
