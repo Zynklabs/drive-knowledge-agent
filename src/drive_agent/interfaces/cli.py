@@ -715,6 +715,7 @@ def slack(ctx: typer.Context) -> None:
 
 
 def _announce_auto_sync(kb: KnowledgeBase) -> None:
+    kb.watch_sync_requests()  # the admin portal's "Sync now" works even with auto-sync off
     if kb.start_auto_sync():
         status = kb.status()
         console.print(

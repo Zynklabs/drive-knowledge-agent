@@ -3,7 +3,9 @@
 - ``heartbeat.json``: rewritten every few seconds while a long-running interface is up;
 - ``activity.jsonl``: one line per question answered (metadata; question text is opt-in);
 - ``sync_progress.json``: the current or last sync, updated as each file is indexed;
-- ``sync_history.jsonl``: one line per finished sync (new, updated and removed files).
+- ``sync_history.jsonl``: one line per finished sync (new, updated and removed files);
+- ``sync_request.json``: left by the admin portal's "Sync now"; the running bot takes it and
+  syncs, so the portal never runs a sync (or loads a model) itself.
 
 Writers never raise: monitoring must not break answering or syncing.
 """
@@ -24,6 +26,7 @@ HEARTBEAT_FILE = "heartbeat.json"
 ACTIVITY_FILE = "activity.jsonl"
 SYNC_PROGRESS_FILE = "sync_progress.json"
 SYNC_HISTORY_FILE = "sync_history.jsonl"
+SYNC_REQUEST_FILE = "sync_request.json"
 
 HEARTBEAT_SECONDS = 30
 STALE_AFTER_SECONDS = 3 * HEARTBEAT_SECONDS
@@ -135,6 +138,27 @@ def read_activity(data_dir: Path, limit: int = 1000) -> list[dict[str, Any]]:
 def read_sync_history(data_dir: Path, limit: int = 500) -> list[dict[str, Any]]:
     """The newest ``limit`` finished syncs, oldest first."""
     return _read_lines(data_dir / SYNC_HISTORY_FILE, limit)
+
+
+def request_sync(data_dir: Path, *, by: str = "admin") -> None:
+    write_json(data_dir / SYNC_REQUEST_FILE, {"requested_at": now_iso(), "by": by})
+
+
+def pending_sync_request(data_dir: Path) -> dict[str, Any] | None:
+    return read_json(data_dir / SYNC_REQUEST_FILE)
+
+
+def take_sync_request(data_dir: Path) -> dict[str, Any] | None:
+    """Claim a pending request (once: renaming it away is atomic), or None if there is none."""
+    path = data_dir / SYNC_REQUEST_FILE
+    taken = path.with_name(f".{path.name}.{os.getpid()}.taken")
+    try:
+        path.replace(taken)
+    except OSError:
+        return None
+    request = read_json(taken) or {}
+    taken.unlink(missing_ok=True)
+    return request
 
 
 class SyncProgress:
