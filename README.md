@@ -124,6 +124,65 @@ drive-agent slack          # Socket Mode: no public URL needed
 
 Add the bot to a channel and mention it: it answers in the thread with linked sources and 👍/👎 feedback, and it remembers the thread's conversation. `/drive-agent <question>` gives a private answer. It answers only in channels it has been added to, so channel membership decides who can ask; direct messages are off unless you set `SLACK_ALLOW_DMS=true`. **One bot per Drive folder:** `drive-agent bot add hr --folder <url>` creates a separate bot with its own index and Slack app, and you run it with `drive-agent --bot hr slack`. Full setup, including the Slack app manifest: **[docs/slack-setup.md](docs/slack-setup.md)**.
 
+## Running several bots on a server
+
+Each bot is its own long-running process, `drive-agent --bot <name> slack`, and keeps its own index fresh on its schedule. One `drive-agent admin` process serves the admin portal for all of them. So on a server (a GCP or any Linux VM) you run one service per bot plus one for the portal. A systemd template unit makes that a single file for any number of bots.
+
+1. **Lay out one deployment directory.** `bots/` and the state directory `.drive-agent/` are resolved from the working directory, so every service must start in the same one:
+
+   ```bash
+   sudo useradd --system --create-home --home-dir /opt/drive-agent drive-agent
+   sudo -iu drive-agent
+   python3 -m venv venv && venv/bin/pip install 'drive-knowledge-agent[slack,streamlit]'
+   # copy in .env (shared settings and keys) and bots/<name>.env for each bot, all chmod 600
+   ```
+
+2. **Run Qdrant as a server.** The embedded on-disk mode (empty `QDRANT_URL`) can be opened by only one process, so with several bots set `QDRANT_URL` in `.env` to a Qdrant server, e.g. `docker run -d --restart unless-stopped -p 127.0.0.1:6333:6333 -v /opt/qdrant:/qdrant/storage qdrant/qdrant`, or Qdrant Cloud. Each bot uses its own collection.
+
+3. **Build each index once** before starting its bot (a first sync of a large folder takes a while): `venv/bin/drive-agent --bot hr sync`.
+
+4. **Add a template unit**, `/etc/systemd/system/drive-agent@.service`, where `%i` is the bot name:
+
+   ```ini
+   [Unit]
+   Description=Drive Agent Slack bot %i
+   After=network-online.target
+   Wants=network-online.target
+
+   [Service]
+   User=drive-agent
+   WorkingDirectory=/opt/drive-agent
+   ExecStart=/opt/drive-agent/venv/bin/drive-agent --bot %i slack
+   Environment=PYTHONUNBUFFERED=1
+   UMask=0077
+   Restart=on-failure
+   RestartSec=10
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+   and one for the portal, `/etc/systemd/system/drive-agent-admin.service`: the same, with `Description=Drive Agent admin portal` and `ExecStart=/opt/drive-agent/venv/bin/drive-agent admin --no-browser --port 8600`.
+
+5. **Start them:**
+
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now drive-agent@hr drive-agent@finance drive-agent-admin
+   systemctl status 'drive-agent@*'           # every bot at a glance
+   journalctl -u drive-agent@hr -f            # one bot's log
+   sudo systemctl restart 'drive-agent@*' drive-agent-admin   # after an upgrade
+   ```
+
+   A new bot is `drive-agent bot add <name> --folder <url>`, its tokens in `bots/<name>.env`, a first sync, then `sudo systemctl enable --now drive-agent@<name>`.
+
+Good to know:
+
+- **No inbound ports.** Socket Mode connects out to Slack, so the VM's firewall can stay closed.
+- **Reach the portal over SSH**, since it binds to `localhost`: `gcloud compute ssh <vm> -- -L 8600:localhost:8600`, then open http://localhost:8600. Serving it with `--host 0.0.0.0` requires `ADMIN_PASSWORD`; put it behind IAP or a VPN as well, because it shows every bot's activity.
+- **Don't add `sync --watch` for a bot that is running.** The bot already syncs on `SYNC_SCHEDULE`, and the portal's **Sync now** button asks the running bot to sync, so the button needs that bot's service up.
+- **Google credentials:** point `GOOGLE_APPLICATION_CREDENTIALS` at a key file readable only by the `drive-agent` user, or leave it empty and run the VM as the service account that has access to the folders (the VM's access scopes must then include `https://www.googleapis.com/auth/drive.readonly`; the default scopes don't). See [docs/google-drive-access.md](docs/google-drive-access.md).
+
 ## Configuration
 
 Settings are layered, lowest to highest priority:
