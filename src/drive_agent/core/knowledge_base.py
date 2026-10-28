@@ -18,7 +18,13 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from drive_agent.core.agent import DriveAgent, create_checkpointer, make_retriever
 from drive_agent.core.config import Settings
 from drive_agent.indexing.loader import FileResult
-from drive_agent.indexing.scheduler import AutoSync, SyncCoordinator, SyncFn, is_overdue
+from drive_agent.indexing.scheduler import (
+    AutoSync,
+    SyncCoordinator,
+    SyncFn,
+    SyncRequests,
+    is_overdue,
+)
 from drive_agent.indexing.state import STATE_DB, SQLiteRecordManager
 from drive_agent.indexing.sync import SyncReport, sync_now
 from drive_agent.llm import LLM
@@ -67,6 +73,7 @@ class KnowledgeBase:
         self.coordinator = SyncCoordinator(settings, index, sync_fn=sync_fn or _sync_now)
         schedule = settings.ingest.schedule_cron
         self.auto_sync = AutoSync(self.coordinator, schedule, self.last_sync) if schedule else None
+        self.sync_requests = SyncRequests(self.coordinator, settings.data_dir)
 
     @classmethod
     def open(cls, settings: Settings) -> KnowledgeBase:
@@ -105,6 +112,10 @@ class KnowledgeBase:
         self.auto_sync.start()
         return True
 
+    def watch_sync_requests(self) -> None:
+        """Run syncs requested from the admin portal while this process runs."""
+        self.sync_requests.start()
+
     def _last_sync_meta(self) -> dict[str, Any]:
         db = self.settings.data_dir / STATE_DB
         if not db.is_file():
@@ -139,6 +150,7 @@ class KnowledgeBase:
     def close(self) -> None:
         if self.auto_sync is not None:
             self.auto_sync.stop()
+        self.sync_requests.stop()
         self.index.close()
         conn = getattr(self.checkpointer, "conn", None)
         if conn is not None:

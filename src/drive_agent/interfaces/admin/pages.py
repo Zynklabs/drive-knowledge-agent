@@ -14,7 +14,12 @@ from typing import Any
 import streamlit as st
 
 from drive_agent.core.config import ConfigError, load_settings
-from drive_agent.core.monitor import read_activity, read_sync_history
+from drive_agent.core.monitor import (
+    pending_sync_request,
+    read_activity,
+    read_sync_history,
+    request_sync,
+)
 from drive_agent.interfaces.admin.data import (
     BotOverview,
     bot_names,
@@ -254,7 +259,13 @@ def activity_page() -> None:
     st.dataframe(rows, hide_index=True, use_container_width=True)
 
 
-TRIGGERS = {"schedule": "auto", "slack": "Slack", "web": "web app", "cli": "CLI"}
+TRIGGERS = {
+    "schedule": "auto",
+    "admin": "admin portal",
+    "slack": "Slack",
+    "web": "web app",
+    "cli": "CLI",
+}
 
 
 def _local(value: Any) -> str:
@@ -294,26 +305,59 @@ def sync_rows(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
+def render_sync_now(bot: BotOverview) -> None:
+    """A "Sync now" button. The bot runs the sync: it picks up the request within seconds."""
+    if bot.settings is None:
+        return
+    pending = pending_sync_request(bot.settings.data_dir)
+    if bot.syncing:
+        reason = "A sync is running."
+    elif pending:
+        reason = (
+            f"Sync requested {when(parse_time(pending.get('requested_at')))}; "
+            "the bot starts it within a few seconds."
+        )
+    elif bot.health != "running":
+        reason = f"The bot is {bot.health}, so it can't sync. Start it first."
+    else:
+        reason = ""
+    button, note = st.columns([1, 4], vertical_alignment="center")
+    if button.button("🔄 Sync now", disabled=bool(reason), key=f"sync-{bot.name}"):
+        request_sync(bot.settings.data_dir)
+        st.rerun()
+    note.caption(reason or "Reads the Drive folder and indexes new and changed files.")
+
+
 def syncs_page() -> None:
     st.title("Syncs")
     name = st.selectbox("Bot", bot_names())
-    try:
-        settings = bot_settings(name)
-    except ConfigError as exc:
-        st.error(str(exc))
+    if name is None:
+        st.info("No bots yet.")
         return
-    history = read_sync_history(settings.data_dir)
-    if not history:
-        st.info(
-            "No syncs recorded yet. Each sync, automatic or manual, shows up here when it ends."
+    st.caption(f"Refreshes every {REFRESH}.")
+
+    @st.fragment(run_every=REFRESH)
+    def syncs() -> None:
+        bot = overview(name)
+        if bot.settings is None:
+            st.error(bot.config_error)
+            return
+        render_sync_now(bot)
+        if bot.syncing:
+            render_sync(bot.sync)
+        history = read_sync_history(bot.settings.data_dir)
+        if not history:
+            st.info(
+                "No syncs recorded yet. Each sync, automatic or manual, shows up here when it ends."
+            )
+            return
+        st.caption(
+            "New files: indexed for the first time (all of them after a full rebuild). "
+            "Updated: changed in Drive. Removed: deleted from Drive, so dropped from the index."
         )
-        return
-    st.caption(
-        "New files: indexed for the first time (all of them after a full rebuild). "
-        "Updated: changed in Drive. "
-        "Removed: deleted from Drive, so dropped from the index."
-    )
-    st.dataframe(sync_rows(history), hide_index=True, use_container_width=True)
+        st.dataframe(sync_rows(history), hide_index=True, use_container_width=True)
+
+    syncs()
 
 
 def logs_page() -> None:

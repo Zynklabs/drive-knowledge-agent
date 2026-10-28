@@ -15,6 +15,7 @@ from drive_agent.core.monitor import (
     SYNC_PROGRESS_FILE,
     Heartbeat,
     SyncProgress,
+    pending_sync_request,
     read_activity,
     read_json,
     record_activity,
@@ -383,3 +384,22 @@ def test_syncs_page_before_any_sync() -> None:
     at = AppTest.from_function(syncs).run()
     assert not at.exception
     assert "No syncs recorded yet" in at.info[0].value
+
+
+def test_sync_now_asks_the_running_bot_to_sync(portal_files: Path) -> None:
+    Heartbeat(portal_files, "slack").beat()
+    at = AppTest.from_function(syncs).run()
+    assert not at.exception
+    button = at.button(key="sync-hr")
+    assert not button.disabled
+    button.click().run()
+    assert pending_sync_request(portal_files) is not None
+    assert at.button(key="sync-hr").disabled  # until the bot takes the request
+    assert "Sync requested" in at.caption[1].value
+
+
+@pytest.mark.usefixtures("portal_files")
+def test_sync_now_needs_a_running_bot() -> None:
+    at = AppTest.from_function(syncs).run()
+    assert at.button(key="sync-hr").disabled
+    assert "never started" in at.caption[1].value

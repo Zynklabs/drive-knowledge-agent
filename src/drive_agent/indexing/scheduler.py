@@ -11,9 +11,11 @@ import logging
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Protocol
 
 from drive_agent.core.config import Settings
+from drive_agent.core.monitor import take_sync_request
 from drive_agent.drive.auth import DriveAuthError
 from drive_agent.indexing.loader import FileResult
 from drive_agent.indexing.sync import SyncError, SyncReport, summarize, sync_now
@@ -85,6 +87,55 @@ def is_overdue(schedule: str, last_sync: datetime | None, now: datetime | None =
     return due is not None and due <= (now or datetime.now(UTC))
 
 
+def run_logged(coordinator: SyncCoordinator, trigger: str, label: str) -> None:
+    """Run a background sync; failures are logged (and kept in the sync history), not raised."""
+    try:
+        coordinator.run(trigger)
+    except SyncBusy:
+        log.info("%s skipped: a sync is already running", label)
+    except (DriveAuthError, SyncError) as exc:
+        log.warning("%s failed: %s", label, exc)
+    except Exception:
+        log.exception("%s crashed", label)
+
+
+class SyncRequests:
+    """Runs the syncs the admin portal asks for with its "Sync now" button.
+
+    The portal leaves a request file in the bot's data dir; this thread takes it within
+    ``every`` seconds and syncs through the bot's coordinator, so a requested sync never
+    overlaps a scheduled one.
+    """
+
+    def __init__(self, coordinator: SyncCoordinator, data_dir: Path, *, every: float = 5) -> None:
+        self._coordinator = coordinator
+        self._data_dir = data_dir
+        self._every = every
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._run, name="sync-requests", daemon=True)
+            self._thread.start()
+
+    def check(self) -> bool:
+        """Run a pending request, if any. True when there was one."""
+        request = take_sync_request(self._data_dir)
+        if request is None:
+            return False
+        log.info("sync requested from the admin portal at %s", request.get("requested_at"))
+        run_logged(self._coordinator, "admin", "admin sync")
+        return True
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._every):
+            self.check()
+
+
 class AutoSync:
     JOB_ID = "drive-sync"
     CATCH_UP_ID = "drive-sync-catch-up"
@@ -126,14 +177,7 @@ class AutoSync:
         log.info("auto-sync on: %s (UTC), next run %s", self.schedule, self.next_run())
 
     def tick(self) -> None:
-        try:
-            self._coordinator.run("schedule")
-        except SyncBusy:
-            log.info("auto-sync skipped: a sync is already running")
-        except (DriveAuthError, SyncError) as exc:
-            log.warning("auto-sync failed: %s", exc)
-        except Exception:
-            log.exception("auto-sync crashed")
+        run_logged(self._coordinator, "schedule", "auto-sync")
 
     def next_run(self) -> datetime | None:
         if self._scheduler is None:

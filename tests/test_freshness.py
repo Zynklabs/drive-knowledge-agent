@@ -15,8 +15,15 @@ import drive_agent.core.knowledge_base as kb_module
 import drive_agent.embeddings
 from drive_agent.core.config import ConfigError, Settings, load_settings
 from drive_agent.core.knowledge_base import KnowledgeBase, next_due
+from drive_agent.core.monitor import pending_sync_request, request_sync
 from drive_agent.drive.auth import DriveAuthError
-from drive_agent.indexing.scheduler import AutoSync, SyncBusy, SyncCoordinator, is_overdue
+from drive_agent.indexing.scheduler import (
+    AutoSync,
+    SyncBusy,
+    SyncCoordinator,
+    SyncRequests,
+    is_overdue,
+)
 from drive_agent.indexing.state import STATE_DB, SQLiteRecordManager
 from drive_agent.indexing.sync import SyncReport
 from drive_agent.interfaces import cli
@@ -308,3 +315,42 @@ def test_status_shows_auto_sync(monkeypatch: pytest.MonkeyPatch) -> None:
     out = CliRunner().invoke(cli.app, ["status"]).output
     assert HOURLY in out
     assert "overdue" in out  # never synced
+
+
+# --- sync requests from the admin portal ------------------------------------------
+
+
+def test_requested_sync_runs_once_through_the_coordinator(tmp_path: Path) -> None:
+    fn = Recorder()
+    requests = SyncRequests(SyncCoordinator(Settings(), object(), sync_fn=fn), tmp_path)  # type: ignore[arg-type]
+    assert requests.check() is False  # nothing requested
+    request_sync(tmp_path)
+    assert pending_sync_request(tmp_path) is not None
+    assert requests.check() is True
+    assert requests.check() is False  # taken: runs once
+    assert pending_sync_request(tmp_path) is None
+    assert fn.calls == [{"full": False, "on_file": None, "trigger": "admin"}]
+
+
+def test_requested_sync_failure_is_logged_not_raised(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    coordinator = SyncCoordinator(Settings(), object(), sync_fn=Recorder(DriveAuthError("x")))  # type: ignore[arg-type]
+    request_sync(tmp_path)
+    assert SyncRequests(coordinator, tmp_path).check() is True
+    assert "admin sync failed: x" in caplog.text
+
+
+def test_requests_are_watched_in_the_background(tmp_path: Path) -> None:
+    fn = Recorder()
+    requests = SyncRequests(
+        SyncCoordinator(Settings(), object(), sync_fn=fn),  # type: ignore[arg-type]
+        tmp_path,
+        every=0.01,
+    )
+    requests.start()
+    try:
+        request_sync(tmp_path)
+        assert fn.started.wait(5)
+    finally:
+        requests.stop()
