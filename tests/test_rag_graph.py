@@ -22,8 +22,13 @@ DOCS = [
         },
     ),
     Document(
-        "Raj.pdf > page 2\n\nRaj. React, TypeScript.",
-        metadata={"file_name": "Raj.pdf", "path": "H/Raj.pdf", "web_url": "https://d/2", "page": 2},
+        "Alex.pdf > page 2\n\nAlex. React, TypeScript.",
+        metadata={
+            "file_name": "Alex.pdf",
+            "path": "H/Alex.pdf",
+            "web_url": "https://d/2",
+            "page": 2,
+        },
     ),
     Document(
         "Deck > slide 3\n\nHiring plan",
@@ -83,7 +88,7 @@ def test_grading_keeps_relevant_passages_in_rank_order() -> None:
     reply = agent(llm, Retriever()).ask("q", thread_id="t")
     sources = llm.answer_calls[0][1][-1]["content"]
     assert sources.index("Jane.pdf") < sources.index("Deck")
-    assert "Raj.pdf" not in sources
+    assert "Alex.pdf" not in sources
     assert [c["file_name"] for c in reply.citations] == ["Deck", "Jane.pdf"]
 
 

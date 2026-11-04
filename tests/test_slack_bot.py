@@ -36,7 +36,7 @@ REPLY = AgentReply(
     answer="**Jane** knows Go [1] & <Rust> [2].",
     status="answered",
     citations=[
-        {"number": 2, "file_name": "Raj.pdf", "page": 2, "web_url": "https://d/2"},
+        {"number": 2, "file_name": "Alex.pdf", "page": 2, "web_url": "https://d/2"},
         {"number": 1, "file_name": "Jane|CV.pdf", "page": 1, "web_url": "https://d/1"},
     ],
 )
@@ -148,7 +148,7 @@ def test_mention_answers_in_thread_with_blocks(tmp_path: Path) -> None:
     assert section["text"]["text"] == "*Jane* knows Go [1] &amp; &lt;Rust&gt; [2]."
     assert [e["text"] for e in context["elements"]] == [
         "<https://d/1|[1] Jane¦CV.pdf · p.1>",
-        "<https://d/2|[2] Raj.pdf · p.2>",
+        "<https://d/2|[2] Alex.pdf · p.2>",
     ]
     assert [e["action_id"] for e in actions["elements"]] == ["feedback_up", "feedback_down"]
     assert actions["elements"][0]["value"] == "slack:C1:100.1"
@@ -655,9 +655,9 @@ def test_slack_connection_reports_drops_and_errors_in_a_window() -> None:
 
 
 def test_narrow_table_becomes_an_aligned_code_block() -> None:
-    table = "| Bot | Files |\n|:---|---:|\n| compliance | 1,843 |\n| growth | 331 |"
+    table = "| Bot | Files |\n|:---|---:|\n| hr | 120 |\n| finance | 45 |"
     assert formatting.to_mrkdwn(table) == (
-        "```\nBot        | Files\n-----------+------\ncompliance | 1,843\ngrowth     | 331\n```"
+        "```\nBot     | Files\n--------+------\nhr      | 120\nfinance | 45\n```"
     )
 
 
