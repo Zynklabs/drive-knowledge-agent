@@ -16,9 +16,9 @@ All notable changes to this project are documented here. The format follows
 - Admin portal (`drive-agent admin`, localhost:8600): each bot's health, files in the folder vs files synced, live sync progress, 24-hour question stats, an activity log (question text only with `SLACK_LOG_QUESTIONS=true`) and live service logs (`LOG_DIR`).
 - Syncs save to the index file by file, so a stopped sync resumes where it left off. Local embedding inputs are capped at 1,024 tokens, which keeps memory bounded on badly-tokenizing text.
 - Faster Drive walking with identical results:
-  - A whole Shared Drive is listed flat in a few requests. On a 692-folder, 3,386-item drive the check went from about 7 min to 17 s.
-  - Other trees list each folder with its own query, 8 in parallel: 250 folders went from 144 s to 23 s.
-  - Folders are never combined into one `or` query, because Drive silently drops some children from those. That was caught when an early version missed 4 Google Docs; the file sets are now verified identical to a one-folder-at-a-time walk.
+  - A whole Shared Drive is listed flat in a few requests. On a Shared Drive with hundreds of folders the check went from minutes to seconds (about 25x faster).
+  - Other trees list each folder with its own query, 8 in parallel, about 6x faster on a tree of a few hundred folders.
+  - Folders are never combined into one `or` query, because Drive silently drops some children from those. That was caught when an early version missed a few Google Docs; the file sets are now verified identical to a one-folder-at-a-time walk.
 - Live progress in `check` and `sync` (folders scanned, items listed, files processed).
 - A Shared Drive used as the root now shows its real name instead of "Drive", in output and citation paths.
 - Auto-sync, owned by the agent: a new `KnowledgeBase` core object bundles the index, conversation memory, the agent and the index's freshness.
